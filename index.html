@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<title>EEX Day Ahead Dashboard</title>
+
+<link rel="stylesheet" href="style.css">
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+
+<body>
+
+<div class="card">
+
+<h2>EPEX Day Ahead Deutschland 2026</h2>
+
+<canvas id="priceChart"></canvas>
+
+<div class="stats">
+
+<div>
+<span>Jahresmittel</span>
+<strong id="avg">-</strong>
+</div>
+
+<div>
+<span>Maximum</span>
+<strong id="max">-</strong>
+</div>
+
+<div>
+<span>Minimum</span>
+<strong id="min">-</strong>
+</div>
+
+</div>
+
+<p class="source">
+Quelle: Energy-Charts (EPEX Spot)
+</p>
+
+</div>
+
+<script src="app.js"></script>
+
+</body>
+</html>
