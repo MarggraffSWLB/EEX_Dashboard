@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EPEX SPOT Day-Ahead Deutschland</title>
+<link rel="stylesheet" href="style.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+<main class="card">
+  <div class="header">
+    <div>
+      <h1>EPEX SPOT Day-Ahead Deutschland</h1>
+      <p>Gebotszone DE-LU · laufendes Jahr</p>
+    </div>
+    <div id="status" class="status">Daten werden geladen …</div>
+  </div>
+  <div class="chart-wrap"><canvas id="priceChart"></canvas></div>
+  <section class="stats">
+    <div><span>Jahresmittel</span><strong id="avg">–</strong></div>
+    <div><span>Minimum</span><strong id="min">–</strong></div>
+    <div><span>Maximum</span><strong id="max">–</strong></div>
+    <div><span>Letzter verfügbarer Preis</span><strong id="latest">–</strong></div>
+  </section>
+  <p class="source">Quelle: Energy-Charts / Fraunhofer ISE · Day-Ahead Spotmarkt DE-LU · Preise in €/MWh · CC BY 4.0</p>
+</main>
+<script src="app.js"></script>
+</body>
+</html>
