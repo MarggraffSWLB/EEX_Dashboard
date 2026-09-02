@@ -1,4 +1,22 @@
-- name: Fetch Energy-Charts Data via API
+name: Update electricity prices
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 * * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  update-data:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Fetch Energy-Charts Data via API
         shell: python
         run: |
           import json
@@ -18,7 +36,6 @@
               except Exception:
                   pass
 
-          # Window: Past 3 days, today, and tomorrow (5 full days)
           start_date = now.date() - dt.timedelta(days=3)
           end_date = now.date() + dt.timedelta(days=1)
 
@@ -50,7 +67,6 @@
           except Exception as e:
               print(f"Failed to fetch data: {e}")
 
-          # Fallback to existing data if API returns empty sets
           if not day_ahead_points and "day_ahead" in existing_data:
               print("Using existing day_ahead data as fallback.")
               day_ahead_points = existing_data["day_ahead"]
@@ -74,3 +90,12 @@
           )
 
           print(f"Saved range {start_date} to {end_date}: {len(output['day_ahead'])} Day Ahead & {len(output['intraday'])} Intraday points.")
+
+      - name: Commit updated data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add data.json
+          git diff --cached --quiet || git commit -m "Update electricity prices"
+          git push
