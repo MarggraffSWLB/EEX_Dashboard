@@ -1,4 +1,31 @@
-name: Fetch Energy-Charts data
+name: Update electricity prices
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 * * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  update-data:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Python packages
+        run: |
+          python -m pip install --upgrade pip
+          pip install playwright
+
+      - name: Install Chromium
+        run: |
+          playwright install --with-deps chromium
+
+      - name: Fetch Energy-Charts data
         shell: python
         run: |
           import json
@@ -12,17 +39,6 @@ name: Fetch Energy-Charts data
 
           start_date = now.date() - dt.timedelta(days=2)
           end_date = now.date() + dt.timedelta(days=1)
-
-          file_path = Path("data.json")
-          existing_data = {}
-
-          # Load previous data if it exists
-          if file_path.exists():
-              try:
-                  existing_data = json.loads(file_path.read_text(encoding="utf-8"))
-                  print("Loaded existing data.json for fallback.")
-              except Exception as e:
-                  print(f"Warning: Could not parse existing data.json: {e}")
 
           url = (
               "https://www.energy-charts.info/"
@@ -74,22 +90,28 @@ name: Fetch Energy-Charts data
           day_ahead_name = "Day Ahead Auktion (DE-LU)"
           intraday_name = "Intraday kontinuierlich, 15 Minuten Durchschnittspreis (DE-LU)"
 
-          day_ahead_raw = None
-          intraday_raw = None
+          day_ahead = None
+          intraday = None
 
           for series in series_list:
               name = series.get("name", "")
               if name == day_ahead_name:
-                  day_ahead_raw = series.get("data", [])
+                  day_ahead = series.get("data", [])
               elif name == intraday_name:
-                  intraday_raw = series.get("data", [])
+                  intraday = series.get("data", [])
+
+          if day_ahead is None:
+              print("Warning: Day-Ahead series not found. Defaulting to empty data.")
+              day_ahead = []
+
+          if intraday is None:
+              print("Warning: Intraday series not found. Defaulting to empty data.")
+              intraday = []
 
           start_ts = int(dt.datetime.combine(start_date, dt.time.min, tzinfo=TZ).timestamp())
           end_ts = int(dt.datetime.combine(end_date, dt.time.max, tzinfo=TZ).timestamp())
 
           def clean(data):
-              if not data:
-                  return []
               cleaned = []
               for p in data:
                   if p.get("x") is None or p.get("y") is None:
@@ -107,39 +129,31 @@ name: Fetch Energy-Charts data
 
               return sorted(cleaned, key=lambda x: x["timestamp"])
 
-          # Clean freshly scraped series
-          cleaned_day_ahead = clean(day_ahead_raw)
-          cleaned_intraday = clean(intraday_raw)
-
-          # Fallback logic: Use previous valid data if scraping returned empty lists
-          if not cleaned_day_ahead and "day_ahead" in existing_data:
-              print("Notice: Scraped day_ahead was empty. Retaining existing valid day_ahead data within current date window.")
-              # Keep previous points that still fall within the start_ts -> end_ts window
-              cleaned_day_ahead = [
-                  p for p in existing_data["day_ahead"] 
-                  if start_ts <= p.get("timestamp", 0) <= end_ts
-              ]
-
-          if not cleaned_intraday and "intraday" in existing_data:
-              print("Notice: Scraped intraday was empty. Retaining existing valid intraday data within current date window.")
-              cleaned_intraday = [
-                  p for p in existing_data["intraday"] 
-                  if start_ts <= p.get("timestamp", 0) <= end_ts
-              ]
-
           output = {
               "generated_at": now.isoformat(),
               "timezone": "Europe/Berlin",
               "start": start_date.isoformat(),
               "end": end_date.isoformat(),
-              "day_ahead": cleaned_day_ahead,
-              "intraday": cleaned_intraday
+              "day_ahead": clean(day_ahead),
+              "intraday": clean(intraday)
           }
 
-          file_path.write_text(
+          Path("data.json").write_text(
               json.dumps(output, ensure_ascii=False, separators=(",", ":")),
               encoding="utf-8"
           )
 
-          print("Day Ahead points saved:", len(output["day_ahead"]))
-          print("Intraday points saved:", len(output["intraday"]))
+          print("Day Ahead points:", len(output["day_ahead"]))
+          print("Intraday points:", len(output["intraday"]))
+
+      - name: Commit updated data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add data.json
+
+          git diff --cached --quiet || \
+            git commit -m "Update electricity prices"
+
+          git push
