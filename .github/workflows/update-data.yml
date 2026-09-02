@@ -1,32 +1,4 @@
-name: Update electricity prices
-
-on:
-  workflow_dispatch:
-
-  schedule:
-    - cron: "17 * * * *"
-
-permissions:
-  contents: write
-
-jobs:
-  update-data:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Python packages
-        run: |
-          python -m pip install --upgrade pip
-          pip install playwright
-
-      - name: Install Chromium
-        run: |
-          playwright install --with-deps chromium
-
-      - name: Fetch Energy-Charts data
+- name: Fetch Energy-Charts data
         shell: python
         run: |
           import json
@@ -36,245 +8,138 @@ jobs:
           from playwright.sync_api import sync_playwright
 
           TZ = ZoneInfo("Europe/Berlin")
-
           now = dt.datetime.now(TZ)
 
-          # Letzte 3 Kalendertage inklusive heute
-          # plus der komplette nächste Tag
-          start_date = (
-              now.date()
-              - dt.timedelta(days=2)
-          )
+          start_date = now.date() - dt.timedelta(days=2)
+          end_date = now.date() + dt.timedelta(days=1)
 
-          end_date = (
-              now.date()
-              + dt.timedelta(days=1)
-          )
+          file_path = Path("data.json")
+          existing_data = {}
+
+          # Load previous data if it exists
+          if file_path.exists():
+              try:
+                  existing_data = json.loads(file_path.read_text(encoding="utf-8"))
+                  print("Loaded existing data.json for fallback.")
+              except Exception as e:
+                  print(f"Warning: Could not parse existing data.json: {e}")
 
           url = (
               "https://www.energy-charts.info/"
               "charts/price_spot_market/chart.htm"
-              "?l=de"
-              "&c=DE"
-              "&interval=week"
-              "&minuteInterval=15min"
-              "&timeslider=0"
+              "?l=de&c=DE&interval=week&minuteInterval=15min&timeslider=0"
           )
 
-          print("Loading:")
-          print(url)
+          print("Loading:", url)
 
-          with sync_playwright() as p:
+          result = {}
 
-              browser = p.chromium.launch(
-                  headless=True
-              )
+          try:
+              with sync_playwright() as p:
+                  browser = p.chromium.launch(headless=True)
+                  page = browser.new_page(viewport={"width": 1600, "height": 1000})
 
-              page = browser.new_page(
-                  viewport={
-                      "width": 1600,
-                      "height": 1000
-                  }
-              )
+                  page.goto(url, wait_until="networkidle", timeout=120000)
+                  page.wait_for_timeout(10000)
 
-              page.goto(
-                  url,
-                  wait_until="networkidle",
-                  timeout=120000
-              )
+                  result = page.evaluate(
+                      """
+                      () => {
+                          const charts = window.Highcharts && window.Highcharts.charts ? window.Highcharts.charts : [];
+                          const chart = charts.find(c => c && c.series && c.series.length);
 
-              page.wait_for_timeout(10000)
+                          if (!chart) {
+                              return { error: "Highcharts chart not found", series: [] };
+                          }
 
-              result = page.evaluate(
-                  """
-                  () => {
-
-                      const charts =
-                          window.Highcharts &&
-                          window.Highcharts.charts
-                          ? window.Highcharts.charts
-                          : [];
-
-                      const chart =
-                          charts.find(
-                              c =>
-                                  c &&
-                                  c.series &&
-                                  c.series.length
-                          );
-
-                      if (!chart) {
                           return {
-                              error:
-                                  "Highcharts chart not found"
+                              series: chart.series.map(s => ({
+                                  name: s.name || "",
+                                  data: (s.data || []).map(p => ({ x: p.x, y: p.y }))
+                              }))
                           };
                       }
-
-                      return {
-                          series:
-                              chart.series.map(
-                                  s => ({
-                                      name: s.name,
-                                      data:
-                                          s.data.map(
-                                              p => ({
-                                                  x: p.x,
-                                                  y: p.y
-                                              })
-                                          )
-                                  })
-                              )
-                      };
-                  }
-                  """
-              )
-
-              browser.close()
+                      """
+                  )
+                  browser.close()
+          except Exception as e:
+              print(f"Warning: Playwright failed or timed out fetching data: {e}")
+              result = {"series": []}
 
           if "error" in result:
-              raise Exception(
-                  result["error"]
-              )
+              print(f"Warning: {result['error']}")
 
-          print("Found series:")
+          series_list = result.get("series", [])
 
-          for s in result["series"]:
-              print(s["name"])
+          day_ahead_name = "Day Ahead Auktion (DE-LU)"
+          intraday_name = "Intraday kontinuierlich, 15 Minuten Durchschnittspreis (DE-LU)"
 
-          day_ahead_name = (
-              "Day Ahead Auktion (DE-LU)"
-          )
+          day_ahead_raw = None
+          intraday_raw = None
 
-          intraday_name = (
-              "Intraday kontinuierlich, "
-              "15 Minuten Durchschnittspreis "
-              "(DE-LU)"
-          )
-
-          day_ahead = None
-          intraday = None
-
-          for series in result["series"]:
-
-              name = series["name"]
-
+          for series in series_list:
+              name = series.get("name", "")
               if name == day_ahead_name:
-                  day_ahead = series["data"]
+                  day_ahead_raw = series.get("data", [])
+              elif name == intraday_name:
+                  intraday_raw = series.get("data", [])
 
-              if name == intraday_name:
-                  intraday = series["data"]
-
-          if day_ahead is None:
-              raise Exception(
-                  "Day-Ahead-Serie nicht gefunden"
-              )
-
-          if intraday is None:
-              raise Exception(
-                  "Intraday-Serie nicht gefunden"
-              )
-
-          # Zeitfenster:
-          # letzte 3 Kalendertage inklusive heute
-          # plus morgen
-
-          start_ts = int(
-              dt.datetime.combine(
-                  start_date,
-                  dt.time.min,
-                  tzinfo=TZ
-              ).timestamp()
-          )
-
-          end_ts = int(
-              dt.datetime.combine(
-                  end_date,
-                  dt.time.max,
-                  tzinfo=TZ
-              ).timestamp()
-          )
+          start_ts = int(dt.datetime.combine(start_date, dt.time.min, tzinfo=TZ).timestamp())
+          end_ts = int(dt.datetime.combine(end_date, dt.time.max, tzinfo=TZ).timestamp())
 
           def clean(data):
-
+              if not data:
+                  return []
               cleaned = []
-
               for p in data:
-
-                  if (
-                      p["x"] is None
-                      or p["y"] is None
-                  ):
+                  if p.get("x") is None or p.get("y") is None:
                       continue
 
-                  timestamp = int(
-                      p["x"] / 1000
-                  )
+                  timestamp = int(p["x"] / 1000)
 
-                  if (
-                      timestamp < start_ts
-                      or timestamp > end_ts
-                  ):
+                  if timestamp < start_ts or timestamp > end_ts:
                       continue
 
-                  cleaned.append(
-                      {
-                          "timestamp": timestamp,
-                          "price": float(p["y"])
-                      }
-                  )
+                  cleaned.append({
+                      "timestamp": timestamp,
+                      "price": float(p["y"])
+                  })
 
-              return sorted(
-                  cleaned,
-                  key=lambda x: x["timestamp"]
-              )
+              return sorted(cleaned, key=lambda x: x["timestamp"])
+
+          # Clean freshly scraped series
+          cleaned_day_ahead = clean(day_ahead_raw)
+          cleaned_intraday = clean(intraday_raw)
+
+          # Fallback logic: Use previous valid data if scraping returned empty lists
+          if not cleaned_day_ahead and "day_ahead" in existing_data:
+              print("Notice: Scraped day_ahead was empty. Retaining existing valid day_ahead data within current date window.")
+              # Keep previous points that still fall within the start_ts -> end_ts window
+              cleaned_day_ahead = [
+                  p for p in existing_data["day_ahead"] 
+                  if start_ts <= p.get("timestamp", 0) <= end_ts
+              ]
+
+          if not cleaned_intraday and "intraday" in existing_data:
+              print("Notice: Scraped intraday was empty. Retaining existing valid intraday data within current date window.")
+              cleaned_intraday = [
+                  p for p in existing_data["intraday"] 
+                  if start_ts <= p.get("timestamp", 0) <= end_ts
+              ]
 
           output = {
-              "generated_at":
-                  now.isoformat(),
-
-              "timezone":
-                  "Europe/Berlin",
-
-              "start":
-                  start_date.isoformat(),
-
-              "end":
-                  end_date.isoformat(),
-
-              "day_ahead":
-                  clean(day_ahead),
-
-              "intraday":
-                  clean(intraday)
+              "generated_at": now.isoformat(),
+              "timezone": "Europe/Berlin",
+              "start": start_date.isoformat(),
+              "end": end_date.isoformat(),
+              "day_ahead": cleaned_day_ahead,
+              "intraday": cleaned_intraday
           }
 
-          Path("data.json").write_text(
-              json.dumps(
-                  output,
-                  ensure_ascii=False,
-                  separators=(",", ":")
-              ),
+          file_path.write_text(
+              json.dumps(output, ensure_ascii=False, separators=(",", ":")),
               encoding="utf-8"
           )
 
-          print(
-              "Day Ahead:",
-              len(output["day_ahead"])
-          )
-
-          print(
-              "Intraday:",
-              len(output["intraday"])
-          )
-
-      - name: Commit updated data
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git add data.json
-
-          git diff --cached --quiet || \
-            git commit -m "Update electricity prices"
-
-          git push
+          print("Day Ahead points saved:", len(output["day_ahead"]))
+          print("Intraday points saved:", len(output["intraday"]))
