@@ -1,96 +1,57 @@
 name: Update electricity prices
 
 on:
-
   workflow_dispatch:
 
   schedule:
-
     - cron: "17 * * * *"
 
-
 permissions:
-
   contents: write
 
-
 jobs:
-
   update-data:
-
     runs-on: ubuntu-latest
 
-
     steps:
-
       - name: Checkout repository
-
         uses: actions/checkout@v4
 
-
       - name: Install Python packages
-
         run: |
-
           python -m pip install --upgrade pip
-
           pip install playwright
 
-
       - name: Install Chromium
-
         run: |
-
           playwright install --with-deps chromium
 
-
       - name: Fetch Energy-Charts data
-
         shell: python
-
         run: |
-
           import json
-
           import datetime as dt
-
           from pathlib import Path
-
           from zoneinfo import ZoneInfo
-
           from playwright.sync_api import sync_playwright
-
 
           TZ = ZoneInfo("Europe/Berlin")
 
-
           now = dt.datetime.now(TZ)
 
+          # Letzte 3 Kalendertage inklusive heute
+          # plus der komplette nächste Tag
+          start_date = (
+              now.date()
+              - dt.timedelta(days=2)
+          )
 
-          start_date =
-              (
-                  now.date()
-                  - dt.timedelta(days=3)
-              )
-
-
-          end_date =
-              (
-                  now.date()
-                  + dt.timedelta(days=1)
-              )
-
-
-          start_iso =
-              start_date.isoformat()
-
-
-          end_iso =
-              end_date.isoformat()
-
+          end_date = (
+              now.date()
+              + dt.timedelta(days=1)
+          )
 
           url = (
-
               "https://www.energy-charts.info/"
               "charts/price_spot_market/chart.htm"
               "?l=de"
@@ -98,31 +59,23 @@ jobs:
               "&interval=week"
               "&minuteInterval=15min"
               "&timeslider=0"
-
           )
 
-
           print("Loading:")
-
           print(url)
-
 
           with sync_playwright() as p:
 
-              browser =
-                  p.chromium.launch(
-                      headless=True
-                  )
+              browser = p.chromium.launch(
+                  headless=True
+              )
 
-
-              page =
-                  browser.new_page(
-                      viewport={
-                          "width": 1600,
-                          "height": 1000
-                      }
-                  )
-
+              page = browser.new_page(
+                  viewport={
+                      "width": 1600,
+                      "height": 1000
+                  }
+              )
 
               page.goto(
                   url,
@@ -130,24 +83,17 @@ jobs:
                   timeout=120000
               )
 
+              page.wait_for_timeout(10000)
 
-              page.wait_for_timeout(
-                  10000
-              )
-
-
-              result =
-                  page.evaluate(
+              result = page.evaluate(
                   """
                   () => {
 
                       const charts =
                           window.Highcharts &&
                           window.Highcharts.charts
-                          ?
-                          window.Highcharts.charts
-                          :
-                          [];
+                          ? window.Highcharts.charts
+                          : [];
 
                       const chart =
                           charts.find(
@@ -158,74 +104,46 @@ jobs:
                           );
 
                       if (!chart) {
-
                           return {
                               error:
                                   "Highcharts chart not found"
                           };
-
                       }
 
-
                       return {
-
                           series:
                               chart.series.map(
                                   s => ({
-
-                                      name:
-                                          s.name,
-
+                                      name: s.name,
                                       data:
                                           s.data.map(
                                               p => ({
-
-                                                  x:
-                                                      p.x,
-
-                                                  y:
-                                                      p.y
-
+                                                  x: p.x,
+                                                  y: p.y
                                               })
                                           )
-
                                   })
                               )
-
                       };
-
                   }
-
                   """
-                  )
-
+              )
 
               browser.close()
 
-
           if "error" in result:
-
               raise Exception(
                   result["error"]
               )
 
-
-          print(
-              "Found series:"
-          )
-
+          print("Found series:")
 
           for s in result["series"]:
-
-              print(
-                  s["name"]
-              )
-
+              print(s["name"])
 
           day_ahead_name = (
               "Day Ahead Auktion (DE-LU)"
           )
-
 
           intraday_name = (
               "Intraday kontinuierlich, "
@@ -233,65 +151,48 @@ jobs:
               "(DE-LU)"
           )
 
-
           day_ahead = None
-
           intraday = None
-
 
           for series in result["series"]:
 
-              name =
-                  series["name"]
-
+              name = series["name"]
 
               if name == day_ahead_name:
-
-                  day_ahead =
-                      series["data"]
-
+                  day_ahead = series["data"]
 
               if name == intraday_name:
-
-                  intraday =
-                      series["data"]
-
+                  intraday = series["data"]
 
           if day_ahead is None:
-
               raise Exception(
                   "Day-Ahead-Serie nicht gefunden"
               )
 
-
           if intraday is None:
-
               raise Exception(
                   "Intraday-Serie nicht gefunden"
               )
 
+          # Zeitfenster:
+          # letzte 3 Kalendertage inklusive heute
+          # plus morgen
 
-          
+          start_ts = int(
+              dt.datetime.combine(
+                  start_date,
+                  dt.time.min,
+                  tzinfo=TZ
+              ).timestamp()
+          )
 
-          start_ts =
-              int(
-                  dt.datetime.combine(
-                      start_date,
-                      dt.time.min,
-                      tzinfo=TZ
-                  ).timestamp()
-              )
-
-
-          end_ts =
-              int(
-                  dt.datetime.combine(
-                      end_date,
-                      dt.time.max,
-                      tzinfo=TZ
-                  ).timestamp()
-              )
-
+          end_ts = int(
+              dt.datetime.combine(
+                  end_date,
+                  dt.time.max,
+                  tzinfo=TZ
+              ).timestamp()
+          )
 
           def clean(data):
 
@@ -303,52 +204,31 @@ jobs:
                       p["x"] is None
                       or p["y"] is None
                   ):
-
                       continue
 
-
-                  timestamp =
-                      int(
-                          p["x"] / 1000
-                      )
-
-
-                  if (
-                      timestamp <
-                      start_ts
-                      or
-                      timestamp >
-                      end_ts
-                  ):
-
-                      continue
-
-
-                  cleaned.append(
-
-                      {
-                          "timestamp":
-                              timestamp,
-
-                          "price":
-                              float(
-                                  p["y"]
-                              )
-
-                      }
-
+                  timestamp = int(
+                      p["x"] / 1000
                   )
 
+                  if (
+                      timestamp < start_ts
+                      or timestamp > end_ts
+                  ):
+                      continue
+
+                  cleaned.append(
+                      {
+                          "timestamp": timestamp,
+                          "price": float(p["y"])
+                      }
+                  )
 
               return sorted(
                   cleaned,
-                  key=lambda x:
-                      x["timestamp"]
+                  key=lambda x: x["timestamp"]
               )
 
-
           output = {
-
               "generated_at":
                   now.isoformat(),
 
@@ -366,62 +246,35 @@ jobs:
 
               "intraday":
                   clean(intraday)
-
           }
 
-
-          Path(
-              "data.json"
-          ).write_text(
-
+          Path("data.json").write_text(
               json.dumps(
                   output,
                   ensure_ascii=False,
-                  separators=(
-                      ",",
-                      ":"
-                  )
+                  separators=(",", ":")
               ),
-
               encoding="utf-8"
-
           )
-
 
           print(
               "Day Ahead:",
-              len(
-                  output[
-                      "day_ahead"
-                  ]
-              )
+              len(output["day_ahead"])
           )
-
 
           print(
               "Intraday:",
-              len(
-                  output[
-                      "intraday"
-                  ]
-              )
+              len(output["intraday"])
           )
 
-
       - name: Commit updated data
-
         run: |
-
-          git config user.name \
-            "github-actions[bot]"
-
-          git config user.email \
-            "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add data.json
 
           git diff --cached --quiet || \
-            git commit \
-            -m "Update electricity prices"
+            git commit -m "Update electricity prices"
 
           git push
