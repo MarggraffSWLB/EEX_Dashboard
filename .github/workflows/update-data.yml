@@ -16,135 +16,83 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Python packages
-        run: |
-          python -m pip install --upgrade pip
-          pip install playwright
-
-      - name: Install Chromium
-        run: |
-          playwright install --with-deps chromium
-
-      - name: Fetch Energy-Charts data
+      - name: Fetch Energy-Charts Data via API
         shell: python
         run: |
           import json
+          import requests
           import datetime as dt
           from pathlib import Path
           from zoneinfo import ZoneInfo
-          from playwright.sync_api import sync_playwright
 
           TZ = ZoneInfo("Europe/Berlin")
           now = dt.datetime.now(TZ)
 
+          file_path = Path("data.json")
+          existing_data = {}
+          if file_path.exists():
+              try:
+                  existing_data = json.loads(file_path.read_text(encoding="utf-8"))
+              except Exception:
+                  pass
+
+          # Calculate date boundaries for API request
           start_date = now.date() - dt.timedelta(days=2)
           end_date = now.date() + dt.timedelta(days=1)
 
-          url = (
-              "https://www.energy-charts.info/"
-              "charts/price_spot_market/chart.htm"
-              "?l=de&c=DE&interval=week&minuteInterval=15min&timeslider=0"
-          )
+          # Fetch Day Ahead and Intraday Spot Market Prices via public API
+          # bzn=DE-LU gives German-Luxembourg market data
+          url = f"https://api.energy-charts.info/price?bzn=DE-LU&start={start_date.isoformat()}&end={end_date.isoformat()}"
+          print("Fetching:", url)
 
-          print("Loading:", url)
-
-          result = {}
+          day_ahead_points = []
+          intraday_points = []
 
           try:
-              with sync_playwright() as p:
-                  browser = p.chromium.launch(headless=True)
-                  page = browser.new_page(viewport={"width": 1600, "height": 1000})
+              response = requests.get(url, timeout=30)
+              if response.status_code == 200:
+                  data = response.json()
+                  
+                  timestamps = data.get("unix_seconds", [])
+                  price_day_ahead = data.get("price", [])
+                  price_intraday = data.get("price_intraday_15min", [])
 
-                  page.goto(url, wait_until="networkidle", timeout=120000)
-                  page.wait_for_timeout(10000)
+                  for ts, price in zip(timestamps, price_day_ahead):
+                      if price is not None:
+                          day_ahead_points.append({"timestamp": ts, "price": float(price)})
 
-                  result = page.evaluate(
-                      """
-                      () => {
-                          const charts = window.Highcharts && window.Highcharts.charts ? window.Highcharts.charts : [];
-                          const chart = charts.find(c => c && c.series && c.series.length);
-
-                          if (!chart) {
-                              return { error: "Highcharts chart not found", series: [] };
-                          }
-
-                          return {
-                              series: chart.series.map(s => ({
-                                  name: s.name || "",
-                                  data: (s.data || []).map(p => ({ x: p.x, y: p.y }))
-                              }))
-                          };
-                      }
-                      """
-                  )
-                  browser.close()
+                  for ts, price in zip(timestamps, price_intraday):
+                      if price is not None:
+                          intraday_points.append({"timestamp": ts, "price": float(price)})
+              else:
+                  print(f"API Error: HTTP {response.status_code}")
           except Exception as e:
-              print(f"Warning: Playwright failed or timed out fetching data: {e}")
-              result = {"series": []}
+              print(f"Failed to fetch data: {e}")
 
-          if "error" in result:
-              print(f"Warning: {result['error']}")
+          # Fallback to existing data if API returns empty sets
+          if not day_ahead_points and "day_ahead" in existing_data:
+              print("Using existing day_ahead data as fallback.")
+              day_ahead_points = existing_data["day_ahead"]
 
-          series_list = result.get("series", [])
-
-          day_ahead_name = "Day Ahead Auktion (DE-LU)"
-          intraday_name = "Intraday kontinuierlich, 15 Minuten Durchschnittspreis (DE-LU)"
-
-          day_ahead = None
-          intraday = None
-
-          for series in series_list:
-              name = series.get("name", "")
-              if name == day_ahead_name:
-                  day_ahead = series.get("data", [])
-              elif name == intraday_name:
-                  intraday = series.get("data", [])
-
-          if day_ahead is None:
-              print("Warning: Day-Ahead series not found. Defaulting to empty data.")
-              day_ahead = []
-
-          if intraday is None:
-              print("Warning: Intraday series not found. Defaulting to empty data.")
-              intraday = []
-
-          start_ts = int(dt.datetime.combine(start_date, dt.time.min, tzinfo=TZ).timestamp())
-          end_ts = int(dt.datetime.combine(end_date, dt.time.max, tzinfo=TZ).timestamp())
-
-          def clean(data):
-              cleaned = []
-              for p in data:
-                  if p.get("x") is None or p.get("y") is None:
-                      continue
-
-                  timestamp = int(p["x"] / 1000)
-
-                  if timestamp < start_ts or timestamp > end_ts:
-                      continue
-
-                  cleaned.append({
-                      "timestamp": timestamp,
-                      "price": float(p["y"])
-                  })
-
-              return sorted(cleaned, key=lambda x: x["timestamp"])
+          if not intraday_points and "intraday" in existing_data:
+              print("Using existing intraday data as fallback.")
+              intraday_points = existing_data["intraday"]
 
           output = {
               "generated_at": now.isoformat(),
               "timezone": "Europe/Berlin",
               "start": start_date.isoformat(),
               "end": end_date.isoformat(),
-              "day_ahead": clean(day_ahead),
-              "intraday": clean(intraday)
+              "day_ahead": sorted(day_ahead_points, key=lambda x: x["timestamp"]),
+              "intraday": sorted(intraday_points, key=lambda x: x["timestamp"])
           }
 
-          Path("data.json").write_text(
+          file_path.write_text(
               json.dumps(output, ensure_ascii=False, separators=(",", ":")),
               encoding="utf-8"
           )
 
-          print("Day Ahead points:", len(output["day_ahead"]))
-          print("Intraday points:", len(output["intraday"]))
+          print(f"Successfully saved {len(output['day_ahead'])} Day Ahead & {len(output['intraday'])} Intraday points.")
 
       - name: Commit updated data
         run: |
@@ -152,8 +100,5 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add data.json
-
-          git diff --cached --quiet || \
-            git commit -m "Update electricity prices"
-
+          git diff --cached --quiet || git commit -m "Update electricity prices"
           git push
