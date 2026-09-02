@@ -1,22 +1,4 @@
-name: Update electricity prices
-
-on:
-  workflow_dispatch:
-  schedule:
-    - cron: "17 * * * *"
-
-permissions:
-  contents: write
-
-jobs:
-  update-data:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Fetch Energy-Charts Data via API
+- name: Fetch Energy-Charts Data via API
         shell: python
         run: |
           import json
@@ -36,14 +18,13 @@ jobs:
               except Exception:
                   pass
 
-          # Calculate date boundaries for API request
-          start_date = now.date() - dt.timedelta(days=2)
+          # Window: Past 3 days, today, and tomorrow (5 full days)
+          start_date = now.date() - dt.timedelta(days=3)
           end_date = now.date() + dt.timedelta(days=1)
 
-          # Fetch Day Ahead and Intraday Spot Market Prices via public API
-          # bzn=DE-LU gives German-Luxembourg market data
           url = f"https://api.energy-charts.info/price?bzn=DE-LU&start={start_date.isoformat()}&end={end_date.isoformat()}"
-          print("Fetching:", url)
+          print(f"Fetching range {start_date} to {end_date}:")
+          print(url)
 
           day_ahead_points = []
           intraday_points = []
@@ -92,13 +73,4 @@ jobs:
               encoding="utf-8"
           )
 
-          print(f"Successfully saved {len(output['day_ahead'])} Day Ahead & {len(output['intraday'])} Intraday points.")
-
-      - name: Commit updated data
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git add data.json
-          git diff --cached --quiet || git commit -m "Update electricity prices"
-          git push
+          print(f"Saved range {start_date} to {end_date}: {len(output['day_ahead'])} Day Ahead & {len(output['intraday'])} Intraday points.")
