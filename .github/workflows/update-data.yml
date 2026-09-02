@@ -271,13 +271,7 @@ jobs:
               )
 
 
-          /*
-           * Zeitfenster:
-           *
-           * letzte 3 Tage
-           * + heute
-           * + morgen
-           */
+          
 
           start_ts =
               int(
