@@ -1,266 +1,471 @@
-/* Hilfsfunktionen */
+name: Update electricity prices
 
-function findLatest(data) {
-    if (!data || !data.length) {
-        return null;
-    }
-    return data
-        .slice()
-        .sort((a, b) => a.timestamp - b.timestamp)
-        .at(-1);
-}
+on:
+  workflow_dispatch:
 
-function formatPrice(value) {
-    return (
-        Number(value).toLocaleString("de-DE", {
-            minimumFractionDigits: 2,
-            maximumFractionDigits: 2
-        }) + " €/MWh"
-    );
-}
+  schedule:
+    - cron: "7,22,37,52 * * * *"
 
-function formatDateTime(timestamp) {
-    return new Date(timestamp).toLocaleString("de-DE", {
-        day: "2-digit",
-        month: "2-digit",
-        hour: "2-digit",
-        minute: "2-digit"
-    });
-}
+permissions:
+  contents: write
 
-async function loadData() {
-    try {
-        const response = await fetch("data.json?ts=" + Date.now(), {
-            cache: "no-store"
-        });
+jobs:
+  update-data:
+    runs-on: ubuntu-latest
 
-        if (!response.ok) {
-            throw new Error("data.json konnte nicht geladen werden.");
-        }
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-        const json = await response.json();
+      - name: Install Python packages
+        run: |
+          python -m pip install --upgrade pip
+          pip install playwright
 
-        if (!json.day_ahead || !json.intraday) {
-            throw new Error("Day-Ahead- oder Intraday-Daten fehlen.");
-        }
+      - name: Install Chromium
+        run: |
+          playwright install --with-deps chromium
 
-        const dayAhead = json.day_ahead;
-        const intraday = json.intraday;
+      - name: Fetch Energy-Charts data
+        shell: python
+        run: |
+          import json
+          import datetime as dt
+          from pathlib import Path
+          from zoneinfo import ZoneInfo
 
-        /*
-         * Alle Datenpunkte zusammenführen
-         */
-        const allTimestamps = [
-            ...dayAhead.map(x => x.timestamp),
-            ...intraday.map(x => x.timestamp)
-        ];
+          from playwright.sync_api import sync_playwright
 
-        if (allTimestamps.length === 0) {
-            throw new Error("Keine Preisdaten in data.json vorhanden.");
-        }
 
-        const minTimestamp = Math.min(...allTimestamps);
-        const maxTimestamp = Math.max(...allTimestamps);
+          # ---------------------------------------------------------
+          # Einstellungen
+          # ---------------------------------------------------------
 
-        /*
-         * Chart-Zeitachse in 15-Minuten-Intervallen (in Millisekunden)
-         */
-        const timestamps = [];
-        const stepMs = 15 * 60 * 1000; // 15 Minuten = 900.000 ms
+          TZ = ZoneInfo("Europe/Berlin")
 
-        for (let t = minTimestamp; t <= maxTimestamp; t += stepMs) {
-            timestamps.push(t);
-        }
+          now = dt.datetime.now(TZ)
 
-        /*
-         * Data Maps
-         */
-        const dayAheadMap = new Map(dayAhead.map(x => [x.timestamp, x.price]));
-        const intradayMap = new Map(intraday.map(x => [x.timestamp, x.price]));
+          # 3 Kalendertage inklusive heute:
+          #
+          # z.B.
+          # 31.08.
+          # 01.09.
+          # 02.09.
+          #
+          # plus morgen:
+          # 03.09.
+          start_date = now.date() - dt.timedelta(days=2)
+          end_date = now.date() + dt.timedelta(days=1)
 
-        /*
-         * Labels
-         */
-        const labels = timestamps.map(timestamp => {
-            const d = new Date(timestamp);
-            return d.toLocaleString("de-DE", {
-                weekday: "short",
-                day: "2-digit",
-                month: "2-digit",
-                hour: "2-digit",
-                minute: "2-digit"
-            });
-        });
 
-        /*
-         * Datenreihen
-         * Forward-fill logic: fills 15-min intervals between hourly Day-Ahead values
-         */
-        let lastValidDayAhead = null;
-        const dayAheadValues = timestamps.map(timestamp => {
-            const exact = dayAheadMap.get(timestamp);
-            if (exact !== undefined && exact !== null) {
-                lastValidDayAhead = exact;
-                return exact;
-            }
-            return lastValidDayAhead;
-        });
+          # ---------------------------------------------------------
+          # Energy-Charts
+          # ---------------------------------------------------------
 
-        const intradayValues = timestamps.map(
-            timestamp => intradayMap.get(timestamp) ?? null
-        );
+          url = (
+              "https://www.energy-charts.info/"
+              "charts/price_spot_market/chart.htm"
+              "?l=de"
+              "&c=DE"
+              "&interval=week"
+              "&minuteInterval=15min"
+              "&timeslider=0"
+          )
 
-        /*
-         * Aktuelle Werte
-         */
-        const currentIntraday = findLatest(intraday);
-        const currentDayAhead = findLatest(dayAhead);
+          print("Loading Energy-Charts:")
+          print(url)
 
-        if (currentIntraday) {
-            document.getElementById("currentIntraday").textContent =
-                formatPrice(currentIntraday.price);
-            document.getElementById("currentIntradayTime").textContent =
-                formatDateTime(currentIntraday.timestamp);
-        }
 
-        if (currentDayAhead) {
-            document.getElementById("currentDayAhead").textContent =
-                formatPrice(currentDayAhead.price);
-            document.getElementById("currentDayAheadTime").textContent =
-                formatDateTime(currentDayAhead.timestamp);
-        }
+          # ---------------------------------------------------------
+          # Energy-Charts mit Chromium öffnen
+          # ---------------------------------------------------------
 
-        /*
-         * Spread
-         */
-        if (currentIntraday && currentDayAhead) {
-            const spread = currentIntraday.price - currentDayAhead.price;
-            document.getElementById("currentSpread").textContent =
-                formatPrice(spread);
-        }
+          with sync_playwright() as p:
 
-        /*
-         * Tagesmittel heute
-         */
-        const todayString = new Date().toLocaleDateString("de-DE");
+              browser = p.chromium.launch(
+                  headless=True
+              )
 
-        const todayValues = intraday
-            .filter(
-                x =>
-                    new Date(x.timestamp).toLocaleDateString("de-DE") ===
-                    todayString
-            )
-            .map(x => x.price);
+              page = browser.new_page(
+                  viewport={
+                      "width": 1600,
+                      "height": 1000
+                  }
+              )
 
-        if (todayValues.length) {
-            const average =
-                todayValues.reduce((a, b) => a + b, 0) / todayValues.length;
-            document.getElementById("todayAverage").textContent =
-                formatPrice(average);
-        }
+              page.goto(
+                  url,
+                  wait_until="domcontentloaded",
+                  timeout=120000
+              )
 
-        /*
-         * Aktualisierungszeit
-         */
-        if (json.generated_at) {
-            document.getElementById("updateTime").textContent =
-                new Date(json.generated_at).toLocaleString("de-DE");
-        }
+              # Warten, bis Highcharts vorhanden ist
+              page.wait_for_function(
+                  """
+                  () =>
+                      window.Highcharts &&
+                      window.Highcharts.charts &&
+                      window.Highcharts.charts.length > 0
+                  """,
+                  timeout=120000
+              )
 
-        /*
-         * Chart Render
-         */
-        const ctx = document.getElementById("priceChart").getContext("2d");
+              # Energy-Charts etwas Zeit zum Laden der Daten geben
+              page.wait_for_timeout(10000)
 
-        new Chart(ctx, {
-            type: "line",
-            data: {
-                labels: labels,
-                datasets: [
-                    {
-                        label: "Intraday kontinuierlich (15 Min.)",
-                        data: intradayValues,
-                        borderColor: "#f39c12",
-                        backgroundColor: "transparent",
-                        borderWidth: 2,
-                        pointRadius: 0,
-                        pointHoverRadius: 5,
-                        stepped: true,
-                        spanGaps: true
-                    },
-                    {
-                        label: "Day Ahead Auktion",
-                        data: dayAheadValues,
-                        borderColor: "#e51c23",
-                        backgroundColor: "transparent",
-                        borderWidth: 2,
-                        pointRadius: 0,
-                        pointHoverRadius: 5,
-                        stepped: true,
-                        spanGaps: true
-                    }
-                ]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                interaction: {
-                    mode: "index",
-                    intersect: false
-                },
-                plugins: {
-                    legend: {
-                        display: false
-                    },
-                    tooltip: {
-                        callbacks: {
-                            title: function (items) {
-                                return items[0].label;
-                            },
-                            label: function (context) {
-                                return (
-                                    context.dataset.label +
-                                    ": " +
-                                    Number(context.parsed.y).toFixed(2) +
-                                    " €/MWh"
-                                );
-                            }
-                        }
-                    }
-                },
-                scales: {
-                    x: {
-                        ticks: {
-                            maxTicksLimit: 20,
-                            maxRotation: 0,
-                            minRotation: 0
-                        },
-                        grid: {
-                            color: "#e5e7eb"
-                        }
-                    },
-                    y: {
-                        title: {
-                            display: true,
-                            text: "Preis (€/MWh)"
-                        },
-                        grid: {
-                            color: "#e5e7eb"
-                        }
-                    }
-                }
-            }
-        });
-    } catch (error) {
-        console.error(error);
 
-        document.getElementById("updateTime").textContent = "Fehler beim Laden";
-        document.querySelector(".chart-container").innerHTML = `
-            <div style="padding:40px; text-align:center; color:#b91c1c;">
-                ${error.message}
-            </div>
-        `;
-    }
-}
+              # -----------------------------------------------------
+              # Daten aus Highcharts auslesen
+              # -----------------------------------------------------
 
-loadData();
+              result = page.evaluate(
+                  """
+                  () => {
+
+                      const charts =
+                          window.Highcharts &&
+                          window.Highcharts.charts
+                          ? window.Highcharts.charts
+                          : [];
+
+
+                      const dayAheadName =
+                          "Day Ahead Auktion (DE-LU)";
+
+
+                      const intradayName =
+                          "Intraday kontinuierlich, 15 Minuten Durchschnittspreis (DE-LU)";
+
+
+                      // Nicht einfach den ersten Chart nehmen.
+                      // Wir suchen gezielt den Chart, der unsere
+                      // beiden benötigten Serien enthält.
+
+                      const chart = charts.find(
+                          c =>
+                              c &&
+                              c.series &&
+                              c.series.some(
+                                  s => s.name === dayAheadName
+                              ) &&
+                              c.series.some(
+                                  s => s.name === intradayName
+                              )
+                      );
+
+
+                      if (!chart) {
+
+                          return {
+                              error:
+                                  "Chart mit Day-Ahead und Intraday Serie nicht gefunden",
+
+                              availableCharts:
+                                  charts.map(
+                                      c =>
+                                          c &&
+                                          c.series
+                                          ? c.series.map(
+                                              s => s.name
+                                          )
+                                          : []
+                                  )
+                          };
+
+                      }
+
+
+                      return {
+
+                          series:
+                              chart.series.map(
+                                  s => ({
+
+                                      name: s.name,
+
+                                      data:
+                                          s.data.map(
+                                              p => ({
+
+                                                  x: p.x,
+
+                                                  y: p.y
+
+                                              })
+                                          )
+
+                                  })
+                              )
+
+                      };
+
+                  }
+                  """
+              )
+
+
+              browser.close()
+
+
+          # ---------------------------------------------------------
+          # Prüfen
+          # ---------------------------------------------------------
+
+          if "error" in result:
+
+              print("ERROR:")
+              print(result["error"])
+
+              print("")
+              print("Available charts:")
+
+              for chart in result.get(
+                  "availableCharts",
+                  []
+              ):
+                  print(chart)
+
+              raise Exception(
+                  result["error"]
+              )
+
+
+          print("")
+          print("Gefundene Serien:")
+          print("")
+
+
+          for series in result["series"]:
+
+              print(
+                  series["name"],
+                  "->",
+                  len(series["data"]),
+                  "Punkte"
+              )
+
+
+          # ---------------------------------------------------------
+          # Gewünschte Serien suchen
+          # ---------------------------------------------------------
+
+          day_ahead_name = (
+              "Day Ahead Auktion (DE-LU)"
+          )
+
+          intraday_name = (
+              "Intraday kontinuierlich, "
+              "15 Minuten Durchschnittspreis "
+              "(DE-LU)"
+          )
+
+
+          day_ahead = None
+          intraday = None
+
+
+          for series in result["series"]:
+
+              if series["name"] == day_ahead_name:
+
+                  day_ahead = series["data"]
+
+
+              if series["name"] == intraday_name:
+
+                  intraday = series["data"]
+
+
+          if day_ahead is None:
+
+              raise Exception(
+                  "Day-Ahead-Serie nicht gefunden"
+              )
+
+
+          if intraday is None:
+
+              raise Exception(
+                  "Intraday-Serie nicht gefunden"
+              )
+
+
+          # ---------------------------------------------------------
+          # Zeitfenster definieren
+          # ---------------------------------------------------------
+
+          start_ts = int(
+              dt.datetime.combine(
+                  start_date,
+                  dt.time.min,
+                  tzinfo=TZ
+              ).timestamp()
+          )
+
+
+          end_ts = int(
+              dt.datetime.combine(
+                  end_date,
+                  dt.time.max,
+                  tzinfo=TZ
+              ).timestamp()
+          )
+
+
+          # ---------------------------------------------------------
+          # Daten bereinigen
+          # ---------------------------------------------------------
+
+          def clean(data):
+
+              cleaned = []
+
+              for point in data:
+
+                  if point["x"] is None:
+                      continue
+
+                  if point["y"] is None:
+                      continue
+
+
+                  # Highcharts verwendet Millisekunden.
+                  timestamp = int(
+                      point["x"] / 1000
+                  )
+
+
+                  if timestamp < start_ts:
+                      continue
+
+                  if timestamp > end_ts:
+                      continue
+
+
+                  cleaned.append(
+                      {
+                          "timestamp": timestamp,
+                          "price": float(point["y"])
+                      }
+                  )
+
+
+              # Nach Zeit sortieren
+              cleaned.sort(
+                  key=lambda x: x["timestamp"]
+              )
+
+
+              # Doppelte Zeitpunkte entfernen
+              unique = {}
+
+              for point in cleaned:
+
+                  unique[
+                      point["timestamp"]
+                  ] = point["price"]
+
+
+              return [
+                  {
+                      "timestamp": timestamp,
+                      "price": price
+                  }
+
+                  for timestamp, price
+                  in sorted(unique.items())
+              ]
+
+
+          day_ahead_clean = clean(
+              day_ahead
+          )
+
+          intraday_clean = clean(
+              intraday
+          )
+
+
+          # ---------------------------------------------------------
+          # Ergebnis schreiben
+          # ---------------------------------------------------------
+
+          output = {
+
+              "generated_at":
+                  now.isoformat(),
+
+              "timezone":
+                  "Europe/Berlin",
+
+              "start":
+                  start_date.isoformat(),
+
+              "end":
+                  end_date.isoformat(),
+
+              "day_ahead":
+                  day_ahead_clean,
+
+              "intraday":
+                  intraday_clean
+
+          }
+
+
+          Path(
+              "data.json"
+          ).write_text(
+
+              json.dumps(
+                  output,
+                  ensure_ascii=False,
+                  separators=(",", ":")
+              ),
+
+              encoding="utf-8"
+
+          )
+
+
+          # ---------------------------------------------------------
+          # Kontrolle
+          # ---------------------------------------------------------
+
+          print("")
+          print("====================================")
+          print("Update erfolgreich")
+          print("====================================")
+          print(
+              "Zeitraum:",
+              start_date,
+              "bis",
+              end_date
+          )
+
+          print(
+              "Day Ahead Punkte:",
+              len(day_ahead_clean)
+          )
+
+          print(
+              "Intraday Punkte:",
+              len(intraday_clean)
+          )
+
+          print(
+              "Data.json geschrieben."
+          )
+
+
+      - name: Commit updated data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add data.json
+
+          git diff --cached --quiet || \
+            git commit -m "Update electricity prices"
+
+          git push
