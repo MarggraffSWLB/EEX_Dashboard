@@ -16,7 +16,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-- name: Fetch Energy-Charts Data via API
+      - name: Fetch Energy-Charts Data via API
         shell: python
         run: |
           import json
@@ -33,13 +33,15 @@ jobs:
           if file_path.exists():
               try:
                   existing_data = json.loads(file_path.read_text(encoding="utf-8"))
-              except Exception:
-                  pass
+                  print("Loaded existing data.json for fallback.")
+              except Exception as e:
+                  print(f"Warning: Could not parse existing data.json: {e}")
 
+          # Window: Past 3 days, today, and tomorrow (5 full days)
           start_date = now.date() - dt.timedelta(days=3)
           end_date = now.date() + dt.timedelta(days=1)
 
-          # Add minute_interval=15 to explicitly request 15-min intraday data
+          # Fetch Day Ahead and 15-min Intraday Spot Market Prices
           url = f"https://api.energy-charts.info/price?bzn=DE-LU&start={start_date.isoformat()}&end={end_date.isoformat()}&minute_interval=15"
           print(f"Fetching range {start_date} to {end_date}:")
           print(url)
@@ -54,26 +56,30 @@ jobs:
                   
                   timestamps = data.get("unix_seconds", [])
                   price_day_ahead = data.get("price", [])
+                  # Energy-Charts returns intraday under price_intraday_15min or price_intraday
                   price_intraday = data.get("price_intraday_15min", []) or data.get("price_intraday", [])
 
                   for ts, price in zip(timestamps, price_day_ahead):
                       if price is not None:
-                          # Multiply ts * 1000 to convert seconds to milliseconds for Highcharts/JS
+                          # Multiply ts * 1000 to convert Unix seconds to milliseconds for Highcharts JS
                           day_ahead_points.append({"timestamp": ts * 1000, "price": float(price)})
 
                   for ts, price in zip(timestamps, price_intraday):
                       if price is not None:
+                          # Multiply ts * 1000 to convert Unix seconds to milliseconds for Highcharts JS
                           intraday_points.append({"timestamp": ts * 1000, "price": float(price)})
               else:
                   print(f"API Error: HTTP {response.status_code}")
           except Exception as e:
               print(f"Failed to fetch data: {e}")
 
-          # Fallback
+          # Fallback to existing data if API returns empty sets
           if not day_ahead_points and "day_ahead" in existing_data:
+              print("Using existing day_ahead data as fallback.")
               day_ahead_points = existing_data["day_ahead"]
 
           if not intraday_points and "intraday" in existing_data:
+              print("Using existing intraday data as fallback.")
               intraday_points = existing_data["intraday"]
 
           output = {
@@ -90,7 +96,7 @@ jobs:
               encoding="utf-8"
           )
 
-          print(f"Saved: {len(output['day_ahead'])} Day Ahead & {len(output['intraday'])} Intraday points.")
+          print(f"Saved range {start_date} to {end_date}: {len(output['day_ahead'])} Day Ahead & {len(output['intraday'])} Intraday points.")
 
       - name: Commit updated data
         run: |
