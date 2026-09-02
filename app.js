@@ -55,6 +55,10 @@ async function loadData() {
             ...intraday.map(x => x.timestamp)
         ];
 
+        if (allTimestamps.length === 0) {
+            throw new Error("Keine Preisdaten in data.json vorhanden.");
+        }
+
         const minTimestamp = Math.min(...allTimestamps);
         const maxTimestamp = Math.max(...allTimestamps);
 
@@ -90,10 +94,17 @@ async function loadData() {
 
         /*
          * Datenreihen
+         * Forward-fill logic: fills 15-min intervals between hourly Day-Ahead values
          */
-        const dayAheadValues = timestamps.map(
-            timestamp => dayAheadMap.get(timestamp) ?? null
-        );
+        let lastValidDayAhead = null;
+        const dayAheadValues = timestamps.map(timestamp => {
+            const exact = dayAheadMap.get(timestamp);
+            if (exact !== undefined && exact !== null) {
+                lastValidDayAhead = exact;
+                return exact;
+            }
+            return lastValidDayAhead;
+        });
 
         const intradayValues = timestamps.map(
             timestamp => intradayMap.get(timestamp) ?? null
@@ -175,7 +186,7 @@ async function loadData() {
                         pointRadius: 0,
                         pointHoverRadius: 5,
                         stepped: true,
-                        spanGaps: false
+                        spanGaps: true
                     },
                     {
                         label: "Day Ahead Auktion",
@@ -186,7 +197,7 @@ async function loadData() {
                         pointRadius: 0,
                         pointHoverRadius: 5,
                         stepped: true,
-                        spanGaps: false
+                        spanGaps: true
                     }
                 ]
             },
