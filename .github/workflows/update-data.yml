@@ -1,4 +1,4 @@
-- name: Fetch Energy-Charts data
+name: Fetch Energy-Charts data
         shell: python
         run: |
           import json
