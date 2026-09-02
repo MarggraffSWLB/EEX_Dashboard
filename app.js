@@ -1,471 +1,849 @@
-name: Update electricity prices
-
-on:
-  workflow_dispatch:
-
-  schedule:
-    - cron: "7,22,37,52 * * * *"
-
-permissions:
-  contents: write
-
-jobs:
-  update-data:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Python packages
-        run: |
-          python -m pip install --upgrade pip
-          pip install playwright
-
-      - name: Install Chromium
-        run: |
-          playwright install --with-deps chromium
-
-      - name: Fetch Energy-Charts data
-        shell: python
-        run: |
-          import json
-          import datetime as dt
-          from pathlib import Path
-          from zoneinfo import ZoneInfo
+let priceChart = null;
+
+
+/* =========================================================
+   Hilfsfunktionen
+   ========================================================= */
+
+
+/*
+ * Aktuellsten Wert bis zu einem bestimmten Zeitpunkt finden.
+ *
+ * Wichtig:
+ * Day-Ahead enthält auch zukünftige Werte.
+ * Deshalb darf nicht einfach der allerletzte Wert
+ * der Datenreihe verwendet werden.
+ */
+function findLatestBefore(data, timestamp) {
+
+    if (!data || !data.length) {
+        return null;
+    }
+
+    const valid = data
+        .filter(
+            point =>
+                point.timestamp <= timestamp
+        )
+        .sort(
+            (a, b) =>
+                a.timestamp - b.timestamp
+        );
+
+    if (!valid.length) {
+        return null;
+    }
+
+    return valid[valid.length - 1];
+}
+
+
+/*
+ * Preis formatieren
+ */
+function formatPrice(value) {
+
+    if (
+        value === null ||
+        value === undefined ||
+        Number.isNaN(Number(value))
+    ) {
+        return "–";
+    }
+
+    return (
+        Number(value).toLocaleString(
+            "de-DE",
+            {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2
+            }
+        ) + " €/MWh"
+    );
+}
+
+
+/*
+ * Datum / Uhrzeit formatieren
+ */
+function formatDateTime(timestamp) {
+
+    return new Date(
+        timestamp
+    ).toLocaleString(
+        "de-DE",
+        {
+            timeZone: "Europe/Berlin",
+
+            day: "2-digit",
+            month: "2-digit",
+            year: "numeric",
+
+            hour: "2-digit",
+            minute: "2-digit"
+        }
+    );
+}
 
-          from playwright.sync_api import sync_playwright
-
 
-          # ---------------------------------------------------------
-          # Einstellungen
-          # ---------------------------------------------------------
+/*
+ * Zeitachse formatieren
+ */
+function formatAxisLabel(timestamp) {
 
-          TZ = ZoneInfo("Europe/Berlin")
+    return new Date(
+        timestamp
+    ).toLocaleString(
+        "de-DE",
+        {
+            timeZone: "Europe/Berlin",
 
-          now = dt.datetime.now(TZ)
+            day: "2-digit",
+            month: "2-digit",
 
-          # 3 Kalendertage inklusive heute:
-          #
-          # z.B.
-          # 31.08.
-          # 01.09.
-          # 02.09.
-          #
-          # plus morgen:
-          # 03.09.
-          start_date = now.date() - dt.timedelta(days=2)
-          end_date = now.date() + dt.timedelta(days=1)
+            hour: "2-digit",
+            minute: "2-digit"
+        }
+    );
+}
 
 
-          # ---------------------------------------------------------
-          # Energy-Charts
-          # ---------------------------------------------------------
+/*
+ * Prüfen, ob ein Timestamp heute ist
+ */
+function isToday(timestamp) {
 
-          url = (
-              "https://www.energy-charts.info/"
-              "charts/price_spot_market/chart.htm"
-              "?l=de"
-              "&c=DE"
-              "&interval=week"
-              "&minuteInterval=15min"
-              "&timeslider=0"
-          )
-
-          print("Loading Energy-Charts:")
-          print(url)
-
-
-          # ---------------------------------------------------------
-          # Energy-Charts mit Chromium öffnen
-          # ---------------------------------------------------------
-
-          with sync_playwright() as p:
+    const date = new Date(timestamp);
 
-              browser = p.chromium.launch(
-                  headless=True
-              )
+    const today = new Date();
 
-              page = browser.new_page(
-                  viewport={
-                      "width": 1600,
-                      "height": 1000
-                  }
-              )
+    return (
+        date.toLocaleDateString(
+            "de-DE",
+            {
+                timeZone: "Europe/Berlin"
+            }
+        )
+        ===
+        today.toLocaleDateString(
+            "de-DE",
+            {
+                timeZone: "Europe/Berlin"
+            }
+        )
+    );
+}
 
-              page.goto(
-                  url,
-                  wait_until="domcontentloaded",
-                  timeout=120000
-              )
 
-              # Warten, bis Highcharts vorhanden ist
-              page.wait_for_function(
-                  """
-                  () =>
-                      window.Highcharts &&
-                      window.Highcharts.charts &&
-                      window.Highcharts.charts.length > 0
-                  """,
-                  timeout=120000
-              )
+/* =========================================================
+   Daten laden
+   ========================================================= */
 
-              # Energy-Charts etwas Zeit zum Laden der Daten geben
-              page.wait_for_timeout(10000)
+async function loadData() {
 
+    try {
 
-              # -----------------------------------------------------
-              # Daten aus Highcharts auslesen
-              # -----------------------------------------------------
+        const response = await fetch(
+            "data.json?ts=" + Date.now(),
+            {
+                cache: "no-store"
+            }
+        );
 
-              result = page.evaluate(
-                  """
-                  () => {
 
-                      const charts =
-                          window.Highcharts &&
-                          window.Highcharts.charts
-                          ? window.Highcharts.charts
-                          : [];
+        if (!response.ok) {
 
+            throw new Error(
+                "data.json konnte nicht geladen werden."
+            );
 
-                      const dayAheadName =
-                          "Day Ahead Auktion (DE-LU)";
+        }
 
 
-                      const intradayName =
-                          "Intraday kontinuierlich, 15 Minuten Durchschnittspreis (DE-LU)";
+        const json =
+            await response.json();
 
 
-                      // Nicht einfach den ersten Chart nehmen.
-                      // Wir suchen gezielt den Chart, der unsere
-                      // beiden benötigten Serien enthält.
+        if (
+            !json.day_ahead ||
+            !json.intraday
+        ) {
 
-                      const chart = charts.find(
-                          c =>
-                              c &&
-                              c.series &&
-                              c.series.some(
-                                  s => s.name === dayAheadName
-                              ) &&
-                              c.series.some(
-                                  s => s.name === intradayName
-                              )
-                      );
+            throw new Error(
+                "Day-Ahead- oder Intraday-Daten fehlen."
+            );
 
+        }
 
-                      if (!chart) {
 
-                          return {
-                              error:
-                                  "Chart mit Day-Ahead und Intraday Serie nicht gefunden",
+        const dayAhead =
+            json.day_ahead;
 
-                              availableCharts:
-                                  charts.map(
-                                      c =>
-                                          c &&
-                                          c.series
-                                          ? c.series.map(
-                                              s => s.name
-                                          )
-                                          : []
-                                  )
-                          };
+        const intraday =
+            json.intraday;
 
-                      }
 
+        if (
+            dayAhead.length === 0 &&
+            intraday.length === 0
+        ) {
 
-                      return {
+            throw new Error(
+                "Keine Preisdaten vorhanden."
+            );
 
-                          series:
-                              chart.series.map(
-                                  s => ({
+        }
 
-                                      name: s.name,
 
-                                      data:
-                                          s.data.map(
-                                              p => ({
+        console.log(
+            "Day Ahead:",
+            dayAhead.length,
+            "Punkte"
+        );
 
-                                                  x: p.x,
+        console.log(
+            "Intraday:",
+            intraday.length,
+            "Punkte"
+        );
 
-                                                  y: p.y
 
-                                              })
-                                          )
+        /* =====================================================
+           Zeitbereich bestimmen
+           ===================================================== */
 
-                                  })
-                              )
+        const allTimestamps = [
 
-                      };
+            ...dayAhead.map(
+                x => x.timestamp
+            ),
 
-                  }
-                  """
-              )
+            ...intraday.map(
+                x => x.timestamp
+            )
 
+        ];
 
-              browser.close()
 
+        const minTimestamp =
+            Math.min(
+                ...allTimestamps
+            );
 
-          # ---------------------------------------------------------
-          # Prüfen
-          # ---------------------------------------------------------
 
-          if "error" in result:
+        const maxTimestamp =
+            Math.max(
+                ...allTimestamps
+            );
 
-              print("ERROR:")
-              print(result["error"])
 
-              print("")
-              print("Available charts:")
+        /*
+         * 15-Minuten-Raster
+         */
+        const stepMs =
+            15 * 60 * 1000;
 
-              for chart in result.get(
-                  "availableCharts",
-                  []
-              ):
-                  print(chart)
 
-              raise Exception(
-                  result["error"]
-              )
+        const timestamps = [];
 
 
-          print("")
-          print("Gefundene Serien:")
-          print("")
+        /*
+         * Auf den nächsten 15-Minuten-Punkt runden
+         */
+        const firstTimestamp =
+            Math.floor(
+                minTimestamp / stepMs
+            ) * stepMs;
 
 
-          for series in result["series"]:
+        for (
+            let timestamp = firstTimestamp;
+            timestamp <= maxTimestamp;
+            timestamp += stepMs
+        ) {
 
-              print(
-                  series["name"],
-                  "->",
-                  len(series["data"]),
-                  "Punkte"
-              )
+            timestamps.push(
+                timestamp
+            );
 
+        }
 
-          # ---------------------------------------------------------
-          # Gewünschte Serien suchen
-          # ---------------------------------------------------------
 
-          day_ahead_name = (
-              "Day Ahead Auktion (DE-LU)"
-          )
+        /* =====================================================
+           Daten Maps
+           ===================================================== */
 
-          intraday_name = (
-              "Intraday kontinuierlich, "
-              "15 Minuten Durchschnittspreis "
-              "(DE-LU)"
-          )
+        const dayAheadMap =
+            new Map(
+                dayAhead.map(
+                    point => [
+                        point.timestamp,
+                        point.price
+                    ]
+                )
+            );
 
 
-          day_ahead = None
-          intraday = None
+        const intradayMap =
+            new Map(
+                intraday.map(
+                    point => [
+                        point.timestamp,
+                        point.price
+                    ]
+                )
+            );
 
 
-          for series in result["series"]:
+        /* =====================================================
+           Datenreihen
+           ===================================================== */
 
-              if series["name"] == day_ahead_name:
+        const dayAheadValues =
+            timestamps.map(
+                timestamp => {
 
-                  day_ahead = series["data"]
+                    const value =
+                        dayAheadMap.get(
+                            timestamp
+                        );
 
+                    return (
+                        value !== undefined
+                        ? value
+                        : null
+                    );
 
-              if series["name"] == intraday_name:
+                }
+            );
 
-                  intraday = series["data"]
 
+        const intradayValues =
+            timestamps.map(
+                timestamp => {
 
-          if day_ahead is None:
+                    const value =
+                        intradayMap.get(
+                            timestamp
+                        );
 
-              raise Exception(
-                  "Day-Ahead-Serie nicht gefunden"
-              )
+                    return (
+                        value !== undefined
+                        ? value
+                        : null
+                    );
 
+                }
+            );
 
-          if intraday is None:
 
-              raise Exception(
-                  "Intraday-Serie nicht gefunden"
-              )
+        /* =====================================================
+           Labels
+           ===================================================== */
 
+        const labels =
+            timestamps.map(
+                timestamp =>
+                    formatAxisLabel(
+                        timestamp
+                    )
+            );
 
-          # ---------------------------------------------------------
-          # Zeitfenster definieren
-          # ---------------------------------------------------------
 
-          start_ts = int(
-              dt.datetime.combine(
-                  start_date,
-                  dt.time.min,
-                  tzinfo=TZ
-              ).timestamp()
-          )
+        /* =====================================================
+           Aktuelle Werte
+           ===================================================== */
 
+        const nowTimestamp =
+            Date.now();
 
-          end_ts = int(
-              dt.datetime.combine(
-                  end_date,
-                  dt.time.max,
-                  tzinfo=TZ
-              ).timestamp()
-          )
 
+        const currentIntraday =
+            findLatestBefore(
+                intraday,
+                nowTimestamp
+            );
 
-          # ---------------------------------------------------------
-          # Daten bereinigen
-          # ---------------------------------------------------------
 
-          def clean(data):
+        const currentDayAhead =
+            findLatestBefore(
+                dayAhead,
+                nowTimestamp
+            );
 
-              cleaned = []
 
-              for point in data:
+        /* -----------------------------------------------------
+           Aktueller Intraday
+           ----------------------------------------------------- */
 
-                  if point["x"] is None:
-                      continue
+        const currentIntradayElement =
+            document.getElementById(
+                "currentIntraday"
+            );
 
-                  if point["y"] is None:
-                      continue
 
+        const currentIntradayTimeElement =
+            document.getElementById(
+                "currentIntradayTime"
+            );
 
-                  # Highcharts verwendet Millisekunden.
-                  timestamp = int(
-                      point["x"] / 1000
-                  )
 
+        if (currentIntraday) {
 
-                  if timestamp < start_ts:
-                      continue
+            currentIntradayElement.textContent =
+                formatPrice(
+                    currentIntraday.price
+                );
 
-                  if timestamp > end_ts:
-                      continue
 
+            currentIntradayTimeElement.textContent =
+                formatDateTime(
+                    currentIntraday.timestamp
+                );
 
-                  cleaned.append(
-                      {
-                          "timestamp": timestamp,
-                          "price": float(point["y"])
-                      }
-                  )
+        }
 
 
-              # Nach Zeit sortieren
-              cleaned.sort(
-                  key=lambda x: x["timestamp"]
-              )
+        /* -----------------------------------------------------
+           Aktueller Day Ahead
+           ----------------------------------------------------- */
 
+        const currentDayAheadElement =
+            document.getElementById(
+                "currentDayAhead"
+            );
 
-              # Doppelte Zeitpunkte entfernen
-              unique = {}
 
-              for point in cleaned:
+        const currentDayAheadTimeElement =
+            document.getElementById(
+                "currentDayAheadTime"
+            );
 
-                  unique[
-                      point["timestamp"]
-                  ] = point["price"]
 
+        if (currentDayAhead) {
 
-              return [
-                  {
-                      "timestamp": timestamp,
-                      "price": price
-                  }
+            currentDayAheadElement.textContent =
+                formatPrice(
+                    currentDayAhead.price
+                );
 
-                  for timestamp, price
-                  in sorted(unique.items())
-              ]
 
+            currentDayAheadTimeElement.textContent =
+                formatDateTime(
+                    currentDayAhead.timestamp
+                );
 
-          day_ahead_clean = clean(
-              day_ahead
-          )
+        }
 
-          intraday_clean = clean(
-              intraday
-          )
 
+        /* =====================================================
+           Spread
+           ===================================================== */
 
-          # ---------------------------------------------------------
-          # Ergebnis schreiben
-          # ---------------------------------------------------------
+        const spreadElement =
+            document.getElementById(
+                "currentSpread"
+            );
 
-          output = {
 
-              "generated_at":
-                  now.isoformat(),
+        if (
+            currentIntraday &&
+            currentDayAhead
+        ) {
 
-              "timezone":
-                  "Europe/Berlin",
+            const spread =
+                currentIntraday.price
+                -
+                currentDayAhead.price;
 
-              "start":
-                  start_date.isoformat(),
 
-              "end":
-                  end_date.isoformat(),
+            spreadElement.textContent =
+                formatPrice(
+                    spread
+                );
 
-              "day_ahead":
-                  day_ahead_clean,
+        }
 
-              "intraday":
-                  intraday_clean
 
-          }
+        /* =====================================================
+           Tagesmittel Intraday
+           ===================================================== */
 
+        const todayValues =
+            intraday
+                .filter(
+                    point =>
+                        isToday(
+                            point.timestamp
+                        )
+                )
+                .map(
+                    point =>
+                        point.price
+                );
 
-          Path(
-              "data.json"
-          ).write_text(
 
-              json.dumps(
-                  output,
-                  ensure_ascii=False,
-                  separators=(",", ":")
-              ),
+        const todayAverageElement =
+            document.getElementById(
+                "todayAverage"
+            );
 
-              encoding="utf-8"
 
-          )
+        if (todayValues.length) {
 
+            const average =
+                todayValues.reduce(
+                    (sum, value) =>
+                        sum + value,
+                    0
+                )
+                /
+                todayValues.length;
 
-          # ---------------------------------------------------------
-          # Kontrolle
-          # ---------------------------------------------------------
 
-          print("")
-          print("====================================")
-          print("Update erfolgreich")
-          print("====================================")
-          print(
-              "Zeitraum:",
-              start_date,
-              "bis",
-              end_date
-          )
+            todayAverageElement.textContent =
+                formatPrice(
+                    average
+                );
 
-          print(
-              "Day Ahead Punkte:",
-              len(day_ahead_clean)
-          )
+        }
 
-          print(
-              "Intraday Punkte:",
-              len(intraday_clean)
-          )
 
-          print(
-              "Data.json geschrieben."
-          )
+        /* =====================================================
+           Aktualisierungszeit
+           ===================================================== */
 
+        const updateTimeElement =
+            document.getElementById(
+                "updateTime"
+            );
 
-      - name: Commit updated data
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add data.json
+        if (
+            json.generated_at
+        ) {
 
-          git diff --cached --quiet || \
-            git commit -m "Update electricity prices"
+            updateTimeElement.textContent =
+                new Date(
+                    json.generated_at
+                ).toLocaleString(
+                    "de-DE",
+                    {
+                        timeZone:
+                            "Europe/Berlin",
 
-          git push
+                        day: "2-digit",
+                        month: "2-digit",
+                        year: "numeric",
+
+                        hour: "2-digit",
+                        minute: "2-digit"
+                    }
+                );
+
+        }
+
+
+        /* =====================================================
+           Chart
+           ===================================================== */
+
+        const canvas =
+            document.getElementById(
+                "priceChart"
+            );
+
+
+        if (!canvas) {
+
+            throw new Error(
+                "Canvas 'priceChart' wurde nicht gefunden."
+            );
+
+        }
+
+
+        const ctx =
+            canvas.getContext(
+                "2d"
+            );
+
+
+        /*
+         * Alten Chart löschen,
+         * falls die Seite neu geladen wird.
+         */
+        if (priceChart) {
+
+            priceChart.destroy();
+
+        }
+
+
+        priceChart =
+            new Chart(
+                ctx,
+                {
+
+                    type: "line",
+
+                    data: {
+
+                        labels: labels,
+
+                        datasets: [
+
+                            {
+                                label:
+                                    "Intraday kontinuierlich, 15 Minuten Durchschnittspreis (DE-LU)",
+
+                                data:
+                                    intradayValues,
+
+                                borderColor:
+                                    "#f39c12",
+
+                                backgroundColor:
+                                    "transparent",
+
+                                borderWidth:
+                                    2,
+
+                                pointRadius:
+                                    0,
+
+                                pointHoverRadius:
+                                    5,
+
+                                stepped:
+                                    true,
+
+                                spanGaps:
+                                    false
+                            },
+
+
+                            {
+                                label:
+                                    "Day Ahead Auktion (DE-LU)",
+
+                                data:
+                                    dayAheadValues,
+
+                                borderColor:
+                                    "#e51c23",
+
+                                backgroundColor:
+                                    "transparent",
+
+                                borderWidth:
+                                    2,
+
+                                pointRadius:
+                                    0,
+
+                                pointHoverRadius:
+                                    5,
+
+                                stepped:
+                                    true,
+
+                                spanGaps:
+                                    false
+                            }
+
+                        ]
+
+                    },
+
+
+                    options: {
+
+                        responsive:
+                            true,
+
+                        maintainAspectRatio:
+                            false,
+
+
+                        interaction: {
+
+                            mode:
+                                "index",
+
+                            intersect:
+                                false
+
+                        },
+
+
+                        plugins: {
+
+                            legend: {
+
+                                display:
+                                    false
+
+                            },
+
+
+                            tooltip: {
+
+                                callbacks: {
+
+                                    title:
+                                        function(items) {
+
+                                            if (
+                                                !items.length
+                                            ) {
+                                                return "";
+                                            }
+
+                                            return formatDateTime(
+                                                timestamps[
+                                                    items[0].dataIndex
+                                                ]
+                                            );
+
+                                        },
+
+
+                                    label:
+                                        function(context) {
+
+                                            if (
+                                                context.parsed.y === null
+                                            ) {
+                                                return null;
+                                            }
+
+
+                                            return (
+                                                context.dataset.label
+                                                +
+                                                ": "
+                                                +
+                                                Number(
+                                                    context.parsed.y
+                                                ).toFixed(2)
+                                                +
+                                                " €/MWh"
+                                            );
+
+                                        }
+
+                                }
+
+                            }
+
+                        },
+
+
+                        scales: {
+
+                            x: {
+
+                                ticks: {
+
+                                    maxTicksLimit:
+                                        20,
+
+                                    maxRotation:
+                                        0,
+
+                                    minRotation:
+                                        0
+
+                                },
+
+                                grid: {
+
+                                    color:
+                                        "#e5e7eb"
+
+                                }
+
+                            },
+
+
+                            y: {
+
+                                title: {
+
+                                    display:
+                                        true,
+
+                                    text:
+                                        "Preis (€/MWh)"
+
+                                },
+
+                                grid: {
+
+                                    color:
+                                        "#e5e7eb"
+
+                                }
+
+                            }
+
+                        }
+
+                    }
+
+                }
+            );
+
+
+    } catch (error) {
+
+        console.error(
+            error
+        );
+
+
+        const updateTime =
+            document.getElementById(
+                "updateTime"
+            );
+
+
+        if (updateTime) {
+
+            updateTime.textContent =
+                "Fehler beim Laden";
+
+        }
+
+
+        const chartContainer =
+            document.querySelector(
+                ".chart-container"
+            );
+
+
+        if (chartContainer) {
+
+            chartContainer.innerHTML = `
+                <div style="
+                    padding:40px;
+                    text-align:center;
+                    color:#b91c1c;
+                ">
+                    ${error.message}
+                </div>
+            `;
+
+        }
+
+    }
+
+}
+
+
+/* =========================================================
+   Start
+   ========================================================= */
+
+loadData();
