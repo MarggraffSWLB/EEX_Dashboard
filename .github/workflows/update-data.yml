@@ -39,59 +39,57 @@ jobs:
           start_date = now.date() - dt.timedelta(days=3)
           end_date = now.date() + dt.timedelta(days=1)
 
-          # Fetch default market prices
-          url = f"https://api.energy-charts.info/price?bzn=DE-LU&start={start_date.isoformat()}&end={end_date.isoformat()}"
-          print("Fetching API:", url)
-
           day_ahead_points = []
           intraday_points = []
 
+          # 1. Fetch 15-minute interval data directly for Intraday + Day Ahead
+          url_15m = f"https://api.energy-charts.info/price?bzn=DE-LU&start={start_date.isoformat()}&end={end_date.isoformat()}&time_step=15m"
+          print("Fetching 15m API:", url_15m)
+
           try:
-              res = requests.get(url, timeout=30)
+              res = requests.get(url_15m, timeout=30)
               if res.status_code == 200:
                   data = res.json()
-                  
                   timestamps = data.get("unix_seconds", [])
-                  prices_da = data.get("price", [])
                   
-                  # Check all potential intraday keys returned by Energy-Charts API
+                  # Look for intraday values under 'price_intraday' or alternative keys
                   prices_id = (
-                      data.get("price_intraday_15min") 
-                      or data.get("price_intraday") 
+                      data.get("price_intraday") 
+                      or data.get("price_intraday_15min") 
                       or data.get("intraday_price") 
                       or []
                   )
+                  
+                  prices_da = data.get("price", [])
 
-                  # Process Day Ahead
-                  for ts, p in zip(timestamps, prices_da):
-                      if p is not None:
-                          day_ahead_points.append({"timestamp": ts * 1000, "price": float(p)})
-
-                  # Process Intraday
                   for ts, p in zip(timestamps, prices_id):
                       if p is not None:
                           intraday_points.append({"timestamp": ts * 1000, "price": float(p)})
 
+                  for ts, p in zip(timestamps, prices_da):
+                      if p is not None:
+                          day_ahead_points.append({"timestamp": ts * 1000, "price": float(p)})
+
           except Exception as e:
-              print(f"Error fetching API: {e}")
+              print(f"Error fetching 15m API: {e}")
 
-          # If intraday came back empty from primary endpoint, query signal endpoint fallback
-          if not intraday_points:
-              print("Intraday empty from main endpoint. Attempting 15-min explicit query...")
+          # 2. Fallback for Day-Ahead if 15m query returned no auction data
+          if not day_ahead_points:
+              print("Fetching hourly Day-Ahead fallback...")
               try:
-                  url_15m = f"https://api.energy-charts.info/price?bzn=DE-LU&start={start_date.isoformat()}&end={end_date.isoformat()}&time_step=15m"
-                  res_15m = requests.get(url_15m, timeout=30)
-                  if res_15m.status_code == 200:
-                      d15 = res_15m.json()
-                      ts_15 = d15.get("unix_seconds", [])
-                      p_15 = d15.get("price_intraday_15min") or d15.get("price_intraday") or []
-                      for ts, p in zip(ts_15, p_15):
+                  url_hourly = f"https://api.energy-charts.info/price?bzn=DE-LU&start={start_date.isoformat()}&end={end_date.isoformat()}"
+                  res_h = requests.get(url_hourly, timeout=30)
+                  if res_h.status_code == 200:
+                      d_h = res_h.json()
+                      ts_h = d_h.get("unix_seconds", [])
+                      p_h = d_h.get("price", [])
+                      for ts, p in zip(ts_h, p_h):
                           if p is not None:
-                              intraday_points.append({"timestamp": ts * 1000, "price": float(p)})
+                              day_ahead_points.append({"timestamp": ts * 1000, "price": float(p)})
               except Exception as e:
-                  print(f"Fallback fetch failed: {e}")
+                  print(f"Hourly fallback failed: {e}")
 
-          # Fallbacks
+          # 3. Existing data fallbacks
           if not day_ahead_points and "day_ahead" in existing_data:
               day_ahead_points = existing_data["day_ahead"]
           if not intraday_points and "intraday" in existing_data:
@@ -116,7 +114,7 @@ jobs:
       - name: Commit updated data
         run: |
           git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.email "41898282+github-actions[bot]"
 
           git add data.json
           git diff --cached --quiet || git commit -m "Update electricity prices"
