@@ -125,44 +125,75 @@ jobs:
 
                   all_series.append(series)
 
+          # ---------------------------------------------------------
+          # Gewünschte Serien exakt auswählen
+          # ---------------------------------------------------------
+
+          day_ahead_name = "Day Ahead Auktion (DE-LU)"
+
+          intraday_name = (
+              "Intraday kontinuierlich, "
+              "15 Minuten Durchschnittspreis (DE-LU)"
+          )
+
           day_ahead = None
           intraday = None
 
           for series in all_series:
-              name = series["name"] or ""
 
-              name_lower = name.lower()
-
-              if (
-                  "day ahead" in name_lower
-                  and "de-lu" in name_lower
-              ):
+              if series["name"] == day_ahead_name:
                   day_ahead = series["data"]
-                  print(
-                      "Day Ahead gefunden:",
-                      name
-                  )
 
-              if (
-                  "intraday kontinuierlich" in name_lower
-                  and "15 minuten" in name_lower
-                  and "de-lu" in name_lower
-              ):
+              elif series["name"] == intraday_name:
                   intraday = series["data"]
-                  print(
-                      "Intraday gefunden:",
-                      name
-                  )
+
 
           if day_ahead is None:
               raise Exception(
-                  "Keine Day-Ahead-Serie gefunden."
+                  "Day-Ahead-Serie nicht gefunden."
               )
 
           if intraday is None:
               raise Exception(
-                  "Keine Intraday-Serie gefunden."
+                  "Intraday-Serie nicht gefunden."
               )
+
+
+          print("")
+          print(
+              "Day Ahead Rohdaten:",
+              len(day_ahead)
+          )
+
+          print(
+              "Intraday Rohdaten:",
+              len(intraday)
+          )
+
+
+          # ---------------------------------------------------------
+          # Zeitstempel untersuchen
+          # ---------------------------------------------------------
+
+          print("")
+          print("Beispiel-Zeitstempel:")
+
+          if day_ahead:
+              print(
+                  "Day Ahead:",
+                  day_ahead[0]["x"]
+              )
+
+          if intraday:
+              print(
+                  "Intraday:",
+                  intraday[0]["x"]
+              )
+
+
+          # ---------------------------------------------------------
+          # Zeitfenster
+          # ---------------------------------------------------------
 
           start_dt = dt.datetime.combine(
               start_date,
@@ -184,18 +215,61 @@ jobs:
               end_dt.timestamp() * 1000
           )
 
+
+          print("")
+          print(
+              "Start:",
+              start_dt,
+              "=>",
+              start_ms
+          )
+
+          print(
+              "End:",
+              end_dt,
+              "=>",
+              end_ms
+          )
+
+
+          # ---------------------------------------------------------
+          # Daten bereinigen
+          # ---------------------------------------------------------
+
           def clean(data):
-              result = []
+
+              cleaned = []
 
               for point in data:
+
                   x = point.get("x")
                   y = point.get("y")
 
-                  if x is None or y is None:
+                  if x is None:
                       continue
 
-                  # Highcharts liefert Millisekunden.
-                  timestamp_ms = int(x)
+                  if y is None:
+                      continue
+
+
+                  # Energy-Charts / Highcharts kann je nach
+                  # Darstellung Sekunden oder Millisekunden liefern.
+                  #
+                  # Unix-Zeit in Sekunden liegt aktuell bei ca.
+                  # 1,7 Milliarden.
+                  #
+                  # Unix-Zeit in Millisekunden liegt aktuell bei ca.
+                  # 1.700.000.000.000.
+                  #
+                  # Deshalb automatisch erkennen.
+
+                  x = float(x)
+
+                  if x < 100000000000:
+                      timestamp_ms = int(x * 1000)
+                  else:
+                      timestamp_ms = int(x)
+
 
                   if timestamp_ms < start_ms:
                       continue
@@ -203,21 +277,43 @@ jobs:
                   if timestamp_ms > end_ms:
                       continue
 
-                  result.append(
-                      {
-                          "timestamp":
-                              timestamp_ms,
 
-                          "price":
-                              float(y)
+                  cleaned.append(
+                      {
+                          "timestamp": timestamp_ms,
+                          "price": float(y)
                       }
                   )
 
-              result.sort(
+
+              cleaned.sort(
                   key=lambda p: p["timestamp"]
               )
 
-              return result
+
+              # Doppelte Zeitpunkte entfernen
+
+              unique = {}
+
+              for point in cleaned:
+
+                  unique[
+                      point["timestamp"]
+                  ] = point["price"]
+
+
+              return [
+                  {
+                      "timestamp": timestamp,
+                      "price": price
+                  }
+
+                  for timestamp, price
+                  in sorted(
+                      unique.items()
+                  )
+              ]
+
 
           day_ahead_clean = clean(
               day_ahead
@@ -226,6 +322,31 @@ jobs:
           intraday_clean = clean(
               intraday
           )
+
+
+          print("")
+          print(
+              "Day Ahead nach Filter:",
+              len(day_ahead_clean)
+          )
+
+          print(
+              "Intraday nach Filter:",
+              len(intraday_clean)
+          )
+
+
+          if len(day_ahead_clean) == 0:
+
+              raise Exception(
+                  "Day-Ahead-Daten nach Filter leer."
+              )
+
+          if len(intraday_clean) == 0:
+
+              raise Exception(
+                  "Intraday-Daten nach Filter leer."
+              )
 
           print("")
           print(
