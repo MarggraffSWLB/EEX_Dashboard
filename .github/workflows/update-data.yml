@@ -33,9 +33,252 @@ jobs:
           import datetime as dt
           from pathlib import Path
           from zoneinfo import ZoneInfo
-
           from playwright.sync_api import sync_playwright
 
+          TZ = ZoneInfo("Europe/Berlin")
+          now = dt.datetime.now(TZ)
+
+          start_date = now.date() - dt.timedelta(days=2)
+          end_date = now.date() + dt.timedelta(days=1)
+
+          url = (
+              "https://www.energy-charts.info/"
+              "charts/price_spot_market/chart.htm"
+              "?c=DE"
+              "&l=de"
+              "&minuteInterval=15min"
+              "&timeslider=0"
+          )
+
+          print("Loading:", url)
+
+          with sync_playwright() as p:
+              browser = p.chromium.launch(headless=True)
+
+              page = browser.new_page(
+                  viewport={
+                      "width": 1600,
+                      "height": 1000
+                  }
+              )
+
+              page.goto(
+                  url,
+                  wait_until="domcontentloaded",
+                  timeout=120000
+              )
+
+              page.wait_for_function(
+                  """
+                  () =>
+                      window.Highcharts &&
+                      window.Highcharts.charts &&
+                      window.Highcharts.charts.some(
+                          c => c && c.series && c.series.length > 0
+                      )
+                  """,
+                  timeout=120000
+              )
+
+              page.wait_for_timeout(10000)
+
+              result = page.evaluate(
+                  """
+                  () => {
+                      const charts =
+                          (window.Highcharts &&
+                           window.Highcharts.charts)
+                          ? window.Highcharts.charts
+                          : [];
+
+                      return charts
+                          .filter(c => c && c.series)
+                          .map(c => ({
+                              series: c.series.map(s => ({
+                                  name: s.name,
+                                  data: s.data.map(p => ({
+                                      x: p.x,
+                                      y: p.y
+                                  }))
+                              }))
+                          }));
+                  }
+                  """
+              )
+
+              browser.close()
+
+          print("Anzahl Charts:", len(result))
+
+          all_series = []
+
+          for chart_index, chart in enumerate(result):
+              print("")
+              print("Chart", chart_index)
+
+              for series in chart["series"]:
+                  print(
+                      "  ",
+                      repr(series["name"]),
+                      len(series["data"])
+                  )
+
+                  all_series.append(series)
+
+          day_ahead = None
+          intraday = None
+
+          for series in all_series:
+              name = series["name"] or ""
+
+              name_lower = name.lower()
+
+              if (
+                  "day ahead" in name_lower
+                  and "de-lu" in name_lower
+              ):
+                  day_ahead = series["data"]
+                  print(
+                      "Day Ahead gefunden:",
+                      name
+                  )
+
+              if (
+                  "intraday kontinuierlich" in name_lower
+                  and "15 minuten" in name_lower
+                  and "de-lu" in name_lower
+              ):
+                  intraday = series["data"]
+                  print(
+                      "Intraday gefunden:",
+                      name
+                  )
+
+          if day_ahead is None:
+              raise Exception(
+                  "Keine Day-Ahead-Serie gefunden."
+              )
+
+          if intraday is None:
+              raise Exception(
+                  "Keine Intraday-Serie gefunden."
+              )
+
+          start_dt = dt.datetime.combine(
+              start_date,
+              dt.time.min,
+              tzinfo=TZ
+          )
+
+          end_dt = dt.datetime.combine(
+              end_date,
+              dt.time.max,
+              tzinfo=TZ
+          )
+
+          start_ms = int(
+              start_dt.timestamp() * 1000
+          )
+
+          end_ms = int(
+              end_dt.timestamp() * 1000
+          )
+
+          def clean(data):
+              result = []
+
+              for point in data:
+                  x = point.get("x")
+                  y = point.get("y")
+
+                  if x is None or y is None:
+                      continue
+
+                  # Highcharts liefert Millisekunden.
+                  timestamp_ms = int(x)
+
+                  if timestamp_ms < start_ms:
+                      continue
+
+                  if timestamp_ms > end_ms:
+                      continue
+
+                  result.append(
+                      {
+                          "timestamp":
+                              timestamp_ms,
+
+                          "price":
+                              float(y)
+                      }
+                  )
+
+              result.sort(
+                  key=lambda p: p["timestamp"]
+              )
+
+              return result
+
+          day_ahead_clean = clean(
+              day_ahead
+          )
+
+          intraday_clean = clean(
+              intraday
+          )
+
+          print("")
+          print(
+              "Day Ahead nach Filter:",
+              len(day_ahead_clean)
+          )
+
+          print(
+              "Intraday nach Filter:",
+              len(intraday_clean)
+          )
+
+          if len(day_ahead_clean) == 0:
+              raise Exception(
+                  "Day-Ahead-Daten nach Filter leer."
+              )
+
+          if len(intraday_clean) == 0:
+              raise Exception(
+                  "Intraday-Daten nach Filter leer."
+              )
+
+          output = {
+              "generated_at":
+                  now.isoformat(),
+
+              "timezone":
+                  "Europe/Berlin",
+
+              "start":
+                  start_date.isoformat(),
+
+              "end":
+                  end_date.isoformat(),
+
+              "day_ahead":
+                  day_ahead_clean,
+
+              "intraday":
+                  intraday_clean
+          }
+
+          Path("data.json").write_text(
+              json.dumps(
+                  output,
+                  ensure_ascii=False,
+                  separators=(",", ":")
+              ),
+              encoding="utf-8"
+          )
+
+          print("")
+          print("data.json erfolgreich geschrieben.")
 
           # ---------------------------------------------------------
           # Einstellungen
