@@ -1,47 +1,63 @@
 name: Update electricity prices
 
 on:
-  workflow_dispatch:
-
   schedule:
-    - cron: "7,22,37,52 * * * *"
+    # Alle 15 Minuten aktualisieren
+    - cron: "*/15 * * * *"
 
-permissions:
-  contents: write
+  # Manuelles Starten über GitHub Actions erlauben
+  workflow_dispatch:
 
 jobs:
   update-data:
     runs-on: ubuntu-latest
 
     steps:
+
+      # ---------------------------------------------------------
+      # 1. Repository laden
+      # ---------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Python packages
+      # ---------------------------------------------------------
+      # 2. Python installieren
+      # ---------------------------------------------------------
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # ---------------------------------------------------------
+      # 3. Playwright installieren
+      # ---------------------------------------------------------
+      - name: Install Playwright
         run: |
-          python -m pip install --upgrade pip
           pip install playwright
+          playwright install chromium --with-deps
 
-      - name: Install Chromium
-        run: |
-          playwright install --with-deps chromium
-
+      # ---------------------------------------------------------
+      # 4. Energy-Charts auslesen
+      # ---------------------------------------------------------
       - name: Fetch Energy-Charts data
-        shell: python
         run: |
-          import json
-          import datetime as dt
-          from pathlib import Path
-          from zoneinfo import ZoneInfo
+
+          python <<'PY'
+
           from playwright.sync_api import sync_playwright
+          from datetime import datetime, timedelta
+          from zoneinfo import ZoneInfo
+          import json
+          import math
 
-          TZ = ZoneInfo("Europe/Berlin")
-          now = dt.datetime.now(TZ)
 
-          start_date = now.date() - dt.timedelta(days=2)
-          end_date = now.date() + dt.timedelta(days=1)
+          # =====================================================
+          # Einstellungen
+          # =====================================================
 
-          url = (
+          TIMEZONE = ZoneInfo("Europe/Berlin")
+
+          URL = (
               "https://www.energy-charts.info/"
               "charts/price_spot_market/chart.htm"
               "?c=DE"
@@ -50,110 +66,415 @@ jobs:
               "&timeslider=0"
           )
 
-          print("Loading:", url)
+          DAY_AHEAD_NAME = "Day Ahead Auktion (DE-LU)"
+
+          INTRADAY_NAME = (
+              "Intraday kontinuierlich, "
+              "15 Minuten Durchschnittspreis (DE-LU)"
+          )
+
+
+          # =====================================================
+          # Zeitbereich bestimmen
+          #
+          # Heute + die beiden vorherigen Tage + morgen
+          # =====================================================
+
+          now = datetime.now(TIMEZONE)
+
+          today = now.replace(
+              hour=0,
+              minute=0,
+              second=0,
+              microsecond=0
+          )
+
+          start = today - timedelta(days=2)
+
+          end = today + timedelta(days=2) - timedelta(milliseconds=1)
+
+          print("")
+          print("=====================================================")
+          print("Energy-Charts Datenimport")
+          print("=====================================================")
+          print("Jetzt:", now)
+          print("Start:", start)
+          print("Ende :", end)
+          print("")
+
+
+          # =====================================================
+          # Hilfsfunktion:
+          # Kategorie aus Highcharts in Zeitstempel umwandeln
+          # =====================================================
+
+          def parse_category(category):
+
+              if category is None:
+                  return None
+
+              # -------------------------------------------------
+              # Bereits numerischer Zeitstempel
+              # -------------------------------------------------
+
+              if isinstance(category, (int, float)):
+
+                  if not math.isfinite(category):
+                      return None
+
+                  # Sekunden -> Millisekunden
+                  if category < 10_000_000_000:
+                      return int(category * 1000)
+
+                  # bereits Millisekunden
+                  return int(category)
+
+
+              text = str(category).strip()
+
+              if not text:
+                  return None
+
+
+              # -------------------------------------------------
+              # Numerischer String
+              # -------------------------------------------------
+
+              try:
+
+                  number = float(text)
+
+                  if math.isfinite(number):
+
+                      if number < 10_000_000_000:
+                          return int(number * 1000)
+
+                      return int(number)
+
+              except ValueError:
+                  pass
+
+
+              # -------------------------------------------------
+              # ISO-Datumsformate
+              # -------------------------------------------------
+
+              iso_text = text.replace("Z", "+00:00")
+
+              try:
+
+                  dt = datetime.fromisoformat(iso_text)
+
+                  if dt.tzinfo is None:
+                      dt = dt.replace(tzinfo=TIMEZONE)
+
+                  return int(dt.timestamp() * 1000)
+
+              except ValueError:
+                  pass
+
+
+              # -------------------------------------------------
+              # Deutsche Datumsformate
+              # -------------------------------------------------
+
+              formats = [
+
+                  "%d.%m.%Y %H:%M",
+                  "%d.%m.%Y %H:%M:%S",
+                  "%d.%m.%Y, %H:%M",
+                  "%d.%m.%Y, %H:%M:%S",
+
+                  "%d.%m.%Y",
+              ]
+
+              for fmt in formats:
+
+                  try:
+
+                      dt = datetime.strptime(text, fmt)
+                      dt = dt.replace(tzinfo=TIMEZONE)
+
+                      return int(dt.timestamp() * 1000)
+
+                  except ValueError:
+                      pass
+
+
+              # -------------------------------------------------
+              # Falls Energy-Charts nur "06.09. 12:15" liefert
+              # -------------------------------------------------
+
+              formats_without_year = [
+
+                  "%d.%m. %H:%M",
+                  "%d.%m. %H:%M:%S",
+              ]
+
+              for fmt in formats_without_year:
+
+                  try:
+
+                      dt = datetime.strptime(text, fmt)
+
+                      dt = dt.replace(
+                          year=today.year,
+                          tzinfo=TIMEZONE
+                      )
+
+                      return int(dt.timestamp() * 1000)
+
+                  except ValueError:
+                      pass
+
+
+              return None
+
+
+          # =====================================================
+          # Browser starten
+          # =====================================================
 
           with sync_playwright() as p:
-              browser = p.chromium.launch(headless=True)
+
+              browser = p.chromium.launch(
+                  headless=True
+              )
 
               page = browser.new_page(
                   viewport={
-                      "width": 1600,
-                      "height": 1000
+                      "width": 1920,
+                      "height": 1080
                   }
               )
 
+              print("Öffne Energy-Charts...")
+
               page.goto(
-                  url,
-                  wait_until="domcontentloaded",
+                  URL,
+                  wait_until="networkidle",
                   timeout=120000
               )
+
+              print("Seite geladen.")
+
+              # -------------------------------------------------
+              # Warten bis Highcharts vorhanden ist
+              # -------------------------------------------------
 
               page.wait_for_function(
                   """
                   () =>
                       window.Highcharts &&
                       window.Highcharts.charts &&
-                      window.Highcharts.charts.some(
-                          c => c && c.series && c.series.length > 0
-                      )
+                      window.Highcharts.charts.length > 0
                   """,
                   timeout=120000
               )
 
+              # Etwas zusätzliche Zeit für die Daten
               page.wait_for_timeout(10000)
+
+
+              # =================================================
+              # Highcharts auslesen
+              # =================================================
 
               result = page.evaluate(
                   """
                   () => {
+
                       const charts =
-                          (window.Highcharts &&
-                           window.Highcharts.charts)
+                          (
+                              window.Highcharts &&
+                              window.Highcharts.charts
+                          )
                           ? window.Highcharts.charts
                           : [];
 
-                      return charts
-                          .filter(c => c && c.series)
-                          .map(c => ({
-                              series: c.series.map(s => ({
-                                  name: s.name,
-                                  data: s.data.map(p => ({
-                                      x: p.x,
-                                      y: p.y
-                                  }))
-                              }))
-                          }));
+                      const chart = charts.find(
+                          c =>
+                              c &&
+                              c.series &&
+                              c.series.some(
+                                  s =>
+                                      s.name ===
+                                      "Day Ahead Auktion (DE-LU)"
+                              ) &&
+                              c.series.some(
+                                  s =>
+                                      s.name ===
+                                      "Intraday kontinuierlich, 15 Minuten Durchschnittspreis (DE-LU)"
+                              )
+                      );
+
+
+                      if (!chart) {
+
+                          return {
+                              error:
+                                  "Passender Energy-Charts Chart nicht gefunden"
+                          };
+
+                      }
+
+
+                      const categories =
+                          chart.xAxis &&
+                          chart.xAxis[0] &&
+                          chart.xAxis[0].categories
+                              ? chart.xAxis[0].categories
+                              : [];
+
+
+                      return {
+
+                          categories: categories,
+
+                          series:
+
+                              chart.series.map(
+                                  s => ({
+
+                                      name: s.name,
+
+                                      data:
+
+                                          s.data.map(
+                                              p => ({
+
+                                                  x: p.x,
+
+                                                  y: p.y,
+
+                                                  category:
+                                                      categories[p.x] ??
+                                                      null
+
+                                              })
+                                          )
+
+                                  })
+                              )
+
+                      };
+
                   }
                   """
               )
 
+
               browser.close()
 
-          print("Anzahl Charts:", len(result))
 
-          all_series = []
+          # =====================================================
+          # Prüfen, ob Chart gefunden wurde
+          # =====================================================
 
-          for chart_index, chart in enumerate(result):
-              print("")
-              print("Chart", chart_index)
+          if result.get("error"):
 
-              for series in chart["series"]:
-                  print(
-                      "  ",
-                      repr(series["name"]),
-                      len(series["data"])
-                  )
+              raise Exception(
+                  result["error"]
+              )
 
-                  all_series.append(series)
 
-          # ---------------------------------------------------------
-          # Gewünschte Serien exakt auswählen
-          # ---------------------------------------------------------
-
-          day_ahead_name = "Day Ahead Auktion (DE-LU)"
-
-          intraday_name = (
-              "Intraday kontinuierlich, "
-              "15 Minuten Durchschnittspreis (DE-LU)"
+          categories = result.get(
+              "categories",
+              []
           )
 
-          day_ahead = None
-          intraday = None
 
-          for series in all_series:
-
-              if series["name"] == day_ahead_name:
-                  day_ahead = series["data"]
-
-              elif series["name"] == intraday_name:
-                  intraday = series["data"]
+          series = result.get(
+              "series",
+              []
+          )
 
 
-          if day_ahead is None:
+          print("")
+          print("=====================================================")
+          print("Highcharts-Auswertung")
+          print("=====================================================")
+
+          print(
+              "Anzahl Kategorien:",
+              len(categories)
+          )
+
+
+          # =====================================================
+          # Kategorien anzeigen
+          #
+          # Das ist wichtig für die Kontrolle, welches Format
+          # Energy-Charts tatsächlich verwendet.
+          # =====================================================
+
+          print("")
+          print("Beispiel-Kategorien:")
+
+          for category in categories[:10]:
+
+              print(
+                  repr(category)
+              )
+
+
+          # =====================================================
+          # Serien anzeigen
+          # =====================================================
+
+          print("")
+          print("Gefundene Serien:")
+
+          for s in series:
+
+              print(
+                  "  ",
+                  repr(s.get("name")),
+                  len(s.get("data", []))
+              )
+
+
+          # =====================================================
+          # Exakt die beiden gewünschten Serien auswählen
+          #
+          # WICHTIG:
+          # Keine Suche mit "Day Ahead" oder "Intraday",
+          # damit nicht versehentlich EXAA oder andere Serien
+          # verwendet werden.
+          # =====================================================
+
+          day_ahead_raw = None
+          intraday_raw = None
+
+
+          for s in series:
+
+              name = s.get("name")
+
+              if name == DAY_AHEAD_NAME:
+
+                  day_ahead_raw = s.get(
+                      "data",
+                      []
+                  )
+
+              elif name == INTRADAY_NAME:
+
+                  intraday_raw = s.get(
+                      "data",
+                      []
+                  )
+
+
+          if day_ahead_raw is None:
+
               raise Exception(
                   "Day-Ahead-Serie nicht gefunden."
               )
 
-          if intraday is None:
+
+          if intraday_raw is None:
+
               raise Exception(
                   "Intraday-Serie nicht gefunden."
               )
@@ -162,214 +483,270 @@ jobs:
           print("")
           print(
               "Day Ahead Rohdaten:",
-              len(day_ahead)
+              len(day_ahead_raw)
           )
 
           print(
               "Intraday Rohdaten:",
-              len(intraday)
+              len(intraday_raw)
           )
 
 
-          # ---------------------------------------------------------
-          # Zeitstempel untersuchen
-          # ---------------------------------------------------------
+          # =====================================================
+          # Daten mit Kategorien verbinden
+          # =====================================================
 
-          print("")
-          print("Beispiel-Zeitstempel:")
+          def convert_series(raw_data):
 
-          if day_ahead:
-              print(
-                  "Day Ahead:",
-                  day_ahead[0]["x"]
-              )
+              converted = []
 
-          if intraday:
-              print(
-                  "Intraday:",
-                  intraday[0]["x"]
-              )
+              for point in raw_data:
 
-
-          # ---------------------------------------------------------
-          # Zeitfenster
-          # ---------------------------------------------------------
-
-          start_dt = dt.datetime.combine(
-              start_date,
-              dt.time.min,
-              tzinfo=TZ
-          )
-
-          end_dt = dt.datetime.combine(
-              end_date,
-              dt.time.max,
-              tzinfo=TZ
-          )
-
-          start_ms = int(
-              start_dt.timestamp() * 1000
-          )
-
-          end_ms = int(
-              end_dt.timestamp() * 1000
-          )
-
-
-          print("")
-          print(
-              "Start:",
-              start_dt,
-              "=>",
-              start_ms
-          )
-
-          print(
-              "End:",
-              end_dt,
-              "=>",
-              end_ms
-          )
-
-
-          # ---------------------------------------------------------
-          # Daten bereinigen
-          # ---------------------------------------------------------
-
-          def clean(data):
-
-              cleaned = []
-
-              for point in data:
-
-                  x = point.get("x")
                   y = point.get("y")
 
-                  if x is None:
-                      continue
+                  category = point.get(
+                      "category"
+                  )
 
+
+                  # Kein Wert
                   if y is None:
                       continue
 
 
-                  # Energy-Charts / Highcharts kann je nach
-                  # Darstellung Sekunden oder Millisekunden liefern.
-                  #
-                  # Unix-Zeit in Sekunden liegt aktuell bei ca.
-                  # 1,7 Milliarden.
-                  #
-                  # Unix-Zeit in Millisekunden liegt aktuell bei ca.
-                  # 1.700.000.000.000.
-                  #
-                  # Deshalb automatisch erkennen.
-
-                  x = float(x)
-
-                  if x < 100000000000:
-                      timestamp_ms = int(x * 1000)
-                  else:
-                      timestamp_ms = int(x)
+                  # Zeit bestimmen
+                  timestamp = parse_category(
+                      category
+                  )
 
 
-                  if timestamp_ms < start_ms:
-                      continue
-
-                  if timestamp_ms > end_ms:
+                  if timestamp is None:
                       continue
 
 
-                  cleaned.append(
+                  # Ungültige Zahlen ignorieren
+                  try:
+
+                      value = float(y)
+
+                      if not math.isfinite(value):
+                          continue
+
+                  except (TypeError, ValueError):
+
+                      continue
+
+
+                  converted.append(
                       {
-                          "timestamp": timestamp_ms,
-                          "price": float(y)
+                          "timestamp": timestamp,
+                          "price": value
                       }
                   )
 
 
-              cleaned.sort(
-                  key=lambda p: p["timestamp"]
+              return converted
+
+
+          day_ahead_all = convert_series(
+              day_ahead_raw
+          )
+
+          intraday_all = convert_series(
+              intraday_raw
+          )
+
+
+          # =====================================================
+          # Kontrollausgabe
+          # =====================================================
+
+          print("")
+          print("=====================================================")
+          print("Nach Umwandlung")
+          print("=====================================================")
+
+          print(
+              "Day Ahead:",
+              len(day_ahead_all)
+          )
+
+          print(
+              "Intraday:",
+              len(intraday_all)
+          )
+
+
+          if day_ahead_all:
+
+              print(
+                  "Erster DA Punkt:",
+                  datetime.fromtimestamp(
+                      day_ahead_all[0]["timestamp"] / 1000,
+                      TIMEZONE
+                  ),
+                  day_ahead_all[0]["price"]
+              )
+
+              print(
+                  "Letzter DA Punkt:",
+                  datetime.fromtimestamp(
+                      day_ahead_all[-1]["timestamp"] / 1000,
+                      TIMEZONE
+                  ),
+                  day_ahead_all[-1]["price"]
               )
 
 
-              # Doppelte Zeitpunkte entfernen
+          if intraday_all:
 
-              unique = {}
+              print(
+                  "Erster ID Punkt:",
+                  datetime.fromtimestamp(
+                      intraday_all[0]["timestamp"] / 1000,
+                      TIMEZONE
+                  ),
+                  intraday_all[0]["price"]
+              )
 
-              for point in cleaned:
+              print(
+                  "Letzter ID Punkt:",
+                  datetime.fromtimestamp(
+                      intraday_all[-1]["timestamp"] / 1000,
+                      TIMEZONE
+                  ),
+                  intraday_all[-1]["price"]
+              )
 
-                  unique[
+
+          # =====================================================
+          # Zeitbereich filtern
+          # =====================================================
+
+          start_ms = int(
+              start.timestamp() * 1000
+          )
+
+          end_ms = int(
+              end.timestamp() * 1000
+          )
+
+
+          day_ahead = [
+
+              p
+
+              for p in day_ahead_all
+
+              if start_ms
+              <= p["timestamp"]
+              <= end_ms
+
+          ]
+
+
+          intraday = [
+
+              p
+
+              for p in intraday_all
+
+              if start_ms
+              <= p["timestamp"]
+              <= end_ms
+
+          ]
+
+
+          print("")
+          print("=====================================================")
+          print("Nach Zeitfilter")
+          print("=====================================================")
+
+          print(
+              "Day Ahead:",
+              len(day_ahead)
+          )
+
+          print(
+              "Intraday:",
+              len(intraday)
+          )
+
+
+          # =====================================================
+          # Sicherheitsprüfung
+          # =====================================================
+
+          if not day_ahead:
+
+              raise Exception(
+                  "Day-Ahead-Daten nach Filter leer."
+              )
+
+
+          if not intraday:
+
+              raise Exception(
+                  "Intraday-Daten nach Filter leer."
+              )
+
+
+          # =====================================================
+          # Nach Zeit sortieren
+          # =====================================================
+
+          day_ahead.sort(
+              key=lambda x: x["timestamp"]
+          )
+
+          intraday.sort(
+              key=lambda x: x["timestamp"]
+          )
+
+
+          # =====================================================
+          # Duplikate entfernen
+          # =====================================================
+
+          def remove_duplicates(data):
+
+              result = {}
+              
+              for point in data:
+
+                  result[
                       point["timestamp"]
                   ] = point["price"]
 
-
               return [
+
                   {
                       "timestamp": timestamp,
                       "price": price
                   }
 
                   for timestamp, price
-                  in sorted(
-                      unique.items()
-                  )
+                  in sorted(result.items())
+
               ]
 
 
-          day_ahead_clean = clean(
+          day_ahead = remove_duplicates(
               day_ahead
           )
 
-          intraday_clean = clean(
+          intraday = remove_duplicates(
               intraday
           )
 
 
-          print("")
-          print(
-              "Day Ahead nach Filter:",
-              len(day_ahead_clean)
-          )
-
-          print(
-              "Intraday nach Filter:",
-              len(intraday_clean)
-          )
-
-
-          if len(day_ahead_clean) == 0:
-
-              raise Exception(
-                  "Day-Ahead-Daten nach Filter leer."
-              )
-
-          if len(intraday_clean) == 0:
-
-              raise Exception(
-                  "Intraday-Daten nach Filter leer."
-              )
-
-          print("")
-          print(
-              "Day Ahead nach Filter:",
-              len(day_ahead_clean)
-          )
-
-          print(
-              "Intraday nach Filter:",
-              len(intraday_clean)
-          )
-
-          if len(day_ahead_clean) == 0:
-              raise Exception(
-                  "Day-Ahead-Daten nach Filter leer."
-              )
-
-          if len(intraday_clean) == 0:
-              raise Exception(
-                  "Intraday-Daten nach Filter leer."
-              )
+          # =====================================================
+          # JSON schreiben
+          # =====================================================
 
           output = {
+
               "generated_at":
                   now.isoformat(),
 
@@ -377,39 +754,73 @@ jobs:
                   "Europe/Berlin",
 
               "start":
-                  start_date.isoformat(),
+                  start.date().isoformat(),
 
               "end":
-                  end_date.isoformat(),
+                  end.date().isoformat(),
 
               "day_ahead":
-                  day_ahead_clean,
+                  day_ahead,
 
               "intraday":
-                  intraday_clean
+                  intraday
+
           }
 
-          Path("data.json").write_text(
-              json.dumps(
+
+          with open(
+              "data.json",
+              "w",
+              encoding="utf-8"
+          ) as f:
+
+              json.dump(
                   output,
+                  f,
                   ensure_ascii=False,
                   separators=(",", ":")
-              ),
-              encoding="utf-8"
-          )
+              )
+
+
+          # =====================================================
+          # Abschlussinformationen
+          # =====================================================
 
           print("")
-          print("data.json erfolgreich geschrieben.")
+          print("=====================================================")
+          print("data.json erfolgreich geschrieben")
+          print("=====================================================")
 
+          print(
+              "Day Ahead Punkte:",
+              len(day_ahead)
+          )
 
-      - name: Commit updated data
+          print(
+              "Intraday Punkte:",
+              len(intraday)
+          )
+
+          print(
+              "Datei: data.json"
+          )
+
+          PY
+
+      # ---------------------------------------------------------
+      # 5. Änderungen speichern und zu GitHub pushen
+      # ---------------------------------------------------------
+      - name: Commit and push data
         run: |
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add data.json
 
-          git diff --cached --quiet || \
+          if git diff --cached --quiet; then
+            echo "Keine Änderungen an data.json."
+          else
             git commit -m "Update electricity prices"
-
-          git push
+            git push
+          fi
